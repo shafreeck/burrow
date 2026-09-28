@@ -68,9 +68,17 @@ func (c *Client) directory() (map[string]string, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	var dir map[string]string
-	if err := json.NewDecoder(resp.Body).Decode(&dir); err != nil {
+	// The directory contains a "meta" object; decode leniently and
+	// extract only the string endpoints we need.
+	var raw map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, err
+	}
+	dir := make(map[string]string, len(raw))
+	for k, v := range raw {
+		if s, ok := v.(string); ok {
+			dir[k] = s
+		}
 	}
 	return dir, nil
 }
