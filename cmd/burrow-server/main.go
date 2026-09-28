@@ -27,7 +27,7 @@ func stateFile() string {
 	if err != nil || dir == "" {
 		dir = "."
 	} else {
-		dir = filepath.Join(dir, "muser")
+		dir = filepath.Join(dir, "burrow")
 	}
 	os.MkdirAll(dir, 0700)
 	return filepath.Join(dir, "server.json")
@@ -151,7 +151,7 @@ func main() {
 			uuid = loadOrGenerateUUID(logf)
 		}
 		// Print UUID and import URL for client config.
-		vlessURL := fmt.Sprintf("vless://%s@%s?encryption=none&security=none&type=tcp#muser",
+		vlessURL := fmt.Sprintf("vless://%s@%s?encryption=none&security=none&type=tcp#burrow",
 			formatUUID(uuid), *vlessAddr)
 		fmt.Printf("\n  VLESS UUID: %s\n", formatUUID(uuid))
 		fmt.Printf("  VLESS URL:  %s\n\n", vlessURL)
