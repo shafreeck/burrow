@@ -84,8 +84,7 @@ func Parse(r io.Reader) (*Request, error) {
 		return nil, fmt.Errorf("vless: read cmd: %w", err)
 	}
 	req.Command = cmd[0]
-	if req.Command != CmdTCP && req.Command != CmdMux {
-		// We support TCP and MUX for now. UDP is P2.
+	if req.Command != CmdTCP && req.Command != CmdMux && req.Command != CmdUDP {
 		return nil, ErrBadCommand
 	}
 	if req.Command == CmdMux {
