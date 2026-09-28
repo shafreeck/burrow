@@ -187,6 +187,26 @@ func (c *Client) post(url string, payload interface{}) (*http.Response, error) {
 	return resp, nil
 }
 
+// checkResponse verifies the HTTP status and returns a descriptive error
+// if the ACME server rejected the request. ACME errors have a numeric
+// "status" field, so we must check before decoding into our structs.
+func checkResponse(resp *http.Response, op string) error {
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	defer resp.Body.Close()
+	var acmeErr struct {
+		Type   string `json:"type"`
+		Detail string `json:"detail"`
+		Status int    `json:"status"`
+	}
+	b, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(b, &acmeErr); err == nil && acmeErr.Detail != "" {
+		return fmt.Errorf("acme %s: %s (type=%s, status=%d)", op, acmeErr.Detail, acmeErr.Type, acmeErr.Status)
+	}
+	return fmt.Errorf("acme %s: http %d: %s", op, resp.StatusCode, b)
+}
+
 // Register creates a new ACME account.
 func (c *Client) Register(email string) error {
 	dir, err := c.directory()
@@ -237,6 +257,9 @@ func (c *Client) ObtainCert(domain string, challengeSrv func(token, keyAuth stri
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := checkResponse(resp, "newOrder"); err != nil {
+		return nil, nil, err
+	}
 	var order struct {
 		Authorizations []string `json:"authorizations"`
 		Finalize       string   `json:"finalize"`
@@ -256,6 +279,9 @@ func (c *Client) ObtainCert(domain string, challengeSrv func(token, keyAuth stri
 	// 2. Get challenge from first authorization.
 	resp, err = c.post(order.Authorizations[0], nil)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := checkResponse(resp, "getAuthorization"); err != nil {
 		return nil, nil, err
 	}
 	var auth struct {
@@ -305,16 +331,25 @@ func (c *Client) ObtainCert(domain string, challengeSrv func(token, keyAuth stri
 		challengeSrv(token, keyAuth)
 		time.Sleep(500 * time.Millisecond) // let server start
 
-		_, err = c.post(challURL, map[string]interface{}{})
+		cresp, err := c.post(challURL, map[string]interface{}{})
 		if err != nil {
 			return nil, nil, err
 		}
+		if err := checkResponse(cresp, "triggerChallenge"); err != nil {
+			return nil, nil, err
+		}
+		cresp.Body.Close()
 
 		// 5. Poll authorization until valid.
 		for i := 0; i < 30; i++ {
 			time.Sleep(2 * time.Second)
 			resp, err := c.post(order.Authorizations[0], nil)
 			if err != nil {
+				continue
+			}
+			if err := checkResponse(resp, "pollAuthorization"); err != nil {
+				// Don't fail the poll on transient errors; retry.
+				// (checkResponse already closed the body on error)
 				continue
 			}
 			var a struct {
@@ -351,6 +386,9 @@ func (c *Client) ObtainCert(domain string, challengeSrv func(token, keyAuth stri
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := checkResponse(resp, "finalizeOrder"); err != nil {
+		return nil, nil, err
+	}
 	resp.Body.Close()
 
 	// 8. Poll order until valid, get certificate URL.
@@ -359,6 +397,10 @@ func (c *Client) ObtainCert(domain string, challengeSrv func(token, keyAuth stri
 		time.Sleep(2 * time.Second)
 		resp, err := c.post(orderURL, nil)
 		if err != nil {
+			continue
+		}
+		if err := checkResponse(resp, "pollOrder"); err != nil {
+			// (checkResponse already closed the body on error)
 			continue
 		}
 		var o struct {
@@ -371,6 +413,9 @@ func (c *Client) ObtainCert(domain string, challengeSrv func(token, keyAuth stri
 			certURL = o.Certificate
 			break
 		}
+		if o.Status == "invalid" {
+			return nil, nil, fmt.Errorf("acme: order invalid")
+		}
 	}
 	if certURL == "" {
 		return nil, nil, fmt.Errorf("acme: order not valid")
@@ -379,6 +424,9 @@ func (c *Client) ObtainCert(domain string, challengeSrv func(token, keyAuth stri
 	// 9. Download certificate.
 	resp, err = c.post(certURL, nil)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := checkResponse(resp, "downloadCert"); err != nil {
 		return nil, nil, err
 	}
 	certPEM, err := io.ReadAll(resp.Body)
