@@ -5,8 +5,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/shafreeck/muser/internal/proto"
-	"github.com/shafreeck/muser/internal/vless"
+	"github.com/shafreeck/burrow/internal/proto"
+	"github.com/shafreeck/burrow/internal/vless"
 )
 
 // ServeVLESS runs a blocking VLESS TCP inbound on addr.

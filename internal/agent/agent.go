@@ -20,8 +20,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shafreeck/muser/internal/proto"
-	"github.com/shafreeck/muser/internal/ws"
+	"github.com/shafreeck/burrow/internal/proto"
+	"github.com/shafreeck/burrow/internal/ws"
 )
 
 // Config for the agent.

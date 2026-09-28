@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shafreeck/muser/internal/acme"
+	"github.com/shafreeck/burrow/internal/acme"
 )
 
 // acmeChallenges holds in-progress HTTP-01 challenge tokens.

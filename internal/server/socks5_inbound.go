@@ -5,8 +5,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/shafreeck/muser/internal/proto"
-	"github.com/shafreeck/muser/internal/socks5"
+	"github.com/shafreeck/burrow/internal/proto"
+	"github.com/shafreeck/burrow/internal/socks5"
 )
 
 // ServeSOCKS5 runs a blocking SOCKS5 TCP inbound on addr.

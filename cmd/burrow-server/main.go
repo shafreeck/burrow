@@ -1,10 +1,10 @@
-// Command muser-server: public side of the VM tunnel.
+// Command burrow-server: public side of the VM tunnel.
 // Listens for agent WebSocket connections, exposes /fetch for testing,
 // and runs a local HTTP proxy (CONNECT + plain HTTP) through the tunnel.
 //
 // Optionally auto-starts a Cloudflare quick tunnel:
 //
-//	muser-server --tunnel --proxy 127.0.0.1:8080
+//	burrow-server --tunnel --proxy 127.0.0.1:8080
 package main
 
 import (
@@ -16,9 +16,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/shafreeck/muser/internal/ca"
-	"github.com/shafreeck/muser/internal/cloudflared"
-	"github.com/shafreeck/muser/internal/server"
+	"github.com/shafreeck/burrow/internal/ca"
+	"github.com/shafreeck/burrow/internal/cloudflared"
+	"github.com/shafreeck/burrow/internal/server"
 )
 
 // stateFile returns the path for persisted server state (UUID, etc).
@@ -274,7 +274,7 @@ func printTunnelBox(public, ws string) {
 	fmt.Printf("  Public URL:  %s\n", public)
 	fmt.Println()
 	fmt.Printf("  Agent command:\n")
-	fmt.Printf("    muser-agent --server %s/ws \\\n", ws)
+	fmt.Printf("    burrow-agent --server %s/ws \\\n", ws)
 	fmt.Printf("        --upstream http://<proxy> [--token <token>]\n")
 	fmt.Println("============================================================")
 	fmt.Println()

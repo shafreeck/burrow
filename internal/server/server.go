@@ -18,8 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shafreeck/muser/internal/proto"
-	"github.com/shafreeck/muser/internal/ws"
+	"github.com/shafreeck/burrow/internal/proto"
+	"github.com/shafreeck/burrow/internal/ws"
 )
 
 // Config for the server.
@@ -630,7 +630,7 @@ func (s *Server) Handler() http.Handler {
 		})
 	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("muser server. Agent: /ws"))
+		w.Write([]byte("burrow server. Agent: /ws"))
 	})
 	return mux
 }

@@ -6,8 +6,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/shafreeck/muser/internal/proto"
-	"github.com/shafreeck/muser/internal/trojan"
+	"github.com/shafreeck/burrow/internal/proto"
+	"github.com/shafreeck/burrow/internal/trojan"
 )
 
 // ServeTrojan runs a blocking Trojan inbound on addr.

@@ -1,4 +1,4 @@
-module github.com/shafreeck/muser
+module github.com/shafreeck/burrow
 
 go 1.21
 

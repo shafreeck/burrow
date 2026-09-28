@@ -1,4 +1,4 @@
-# muser
+# burrow
 
 把一台**没有公网出口、只能走 HTTP CONNECT 代理**的机器（如沙箱 VM），
 通过 WebSocket 隧道变成你本地浏览器的出口。
@@ -6,9 +6,9 @@
 ```
 浏览器
   ↓  127.0.0.1:8080 (本地 HTTP 代理)
-muser-server (你 Mac / 公网机器)
+burrow-server (你 Mac / 公网机器)
   ↓  WebSocket (wss, 可经 Cloudflare Tunnel)
-muser-agent (VM)
+burrow-agent (VM)
   ↓  HTTP CONNECT → 上游代理 (如 198.19.0.1:3128)
 目标网站
 ```
@@ -20,18 +20,18 @@ muser-agent (VM)
 ### 1. 编译
 
 ```bash
-go build -o muser-server ./cmd/muser-server
-go build -o muser-agent ./cmd/muser-agent
+go build -o burrow-server ./cmd/burrow-server
+go build -o burrow-agent ./cmd/burrow-agent
 ```
 
 ### 2. 启动 server（Mac）
 
 ```bash
 # 自动拉起 cloudflared quick tunnel（推荐，URL 会打印在日志里）
-./muser-server --tunnel --proxy 127.0.0.1:8080
+./burrow-server --tunnel --proxy 127.0.0.1:8080
 
 # 已有公网 IP / 域名：不需要 tunnel
-./muser-server --proxy 127.0.0.1:8080 --listen 0.0.0.0:9000
+./burrow-server --proxy 127.0.0.1:8080 --listen 0.0.0.0:9000
 ```
 
 常用参数：
@@ -50,7 +50,7 @@ go build -o muser-agent ./cmd/muser-agent
 ### 3. 启动 agent（VM）
 
 ```bash
-./muser-agent \
+./burrow-agent \
   --server wss://<tunnel-url>/ws \
   --upstream http://198.19.0.1:3128
 ```

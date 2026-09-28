@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shafreeck/muser/internal/proto"
-	"github.com/shafreeck/muser/internal/vless"
+	"github.com/shafreeck/burrow/internal/proto"
+	"github.com/shafreeck/burrow/internal/vless"
 )
 
 // handleMuxConn handles multiplexed MUX (mux.cool) sessions over a single

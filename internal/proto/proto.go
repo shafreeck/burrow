@@ -1,5 +1,5 @@
 // Package proto defines the WebSocket tunnel protocol between
-// muser-server (public side) and muser-agent (VM side).
+// burrow-server (public side) and burrow-agent (VM side).
 //
 // Two frame types:
 //   - Text frames: JSON control messages (see Type constants)
