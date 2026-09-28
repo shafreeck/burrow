@@ -137,9 +137,13 @@ func (c *Client) post(url string, payload interface{}) (*http.Response, error) {
 	}
 
 	protJSON, _ := json.Marshal(protected)
-	payloadJSON, _ := json.Marshal(payload)
+	// POST-as-GET (RFC 8555 §7.3): empty payload, not "null".
+	var payloadB64 string
+	if payload != nil {
+		payloadJSON, _ := json.Marshal(payload)
+		payloadB64 = base64.RawURLEncoding.EncodeToString(payloadJSON)
+	}
 	protB64 := base64.RawURLEncoding.EncodeToString(protJSON)
-	payloadB64 := base64.RawURLEncoding.EncodeToString(payloadJSON)
 	signingInput := protB64 + "." + payloadB64
 
 	var sig []byte
