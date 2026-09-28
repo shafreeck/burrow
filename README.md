@@ -1,57 +1,60 @@
 # burrow
 
-把一台**只能主动出站、没有公网入口**的机器，通过 WebSocket 反向隧道变成你的代理出口。
+Turn a machine that **can only dial out** into your proxy egress, via a reverse
+WebSocket tunnel.
 
-> **实测场景**：Muse 沙箱 VM。VM 的所有出站 TCP 被强制改写到 `198.19.0.1:3128`
->（HTTP CONNECT 代理，HTTPS 还会被 MITM），UDP 全禁。`burrow-agent` 跑在 VM 里，
->经沙箱代理拨出 WebSocket 连回 `burrow-server`，浏览器流量就从 VM 出口走了。
->其他受限环境（公司内网、NAT 后的机器）原理相同，但暂未实测。
+> **Tested scenario**: Muse sandbox VM. All outbound TCP in the VM is
+> transparently rewritten to `198.19.0.1:3128` (a no-auth HTTP CONNECT proxy,
+> MITMs HTTPS), UDP fully disabled. `burrow-agent` runs in the VM, dials out
+> through the sandbox proxy over WebSocket back to `burrow-server`, and your
+> browser traffic exits from the VM. Other restricted environments (corporate
+> NAT, etc.) work on the same principle but are untested.
 
 ```
-浏览器
-  ↓  127.0.0.1:8080 (本地 HTTP 代理) / :1080 (SOCKS5) / :8443 (VLESS)
-burrow-server (你 Mac / 公网机器)
-  ↓  WebSocket (wss, 可经 Cloudflare Tunnel)
+browser
+  ↓  127.0.0.1:8080 (local HTTP proxy) / :1080 (SOCKS5) / :8443 (VLESS)
+burrow-server (your Mac / public box)
+  ↓  WebSocket (wss, via Cloudflare Tunnel)
 burrow-agent (VM)
-  ↓  HTTP CONNECT → 上游代理 (如 198.19.0.1:3128)
-目标网站
+  ↓  HTTP CONNECT → upstream proxy (e.g. 198.19.0.1:3128)
+target website
 ```
 
-纯 Go 标准库，无第三方依赖。单文件交叉编译，开箱即用。
+Pure Go, zero third-party dependencies for the core. Single-binary cross-compile.
 
-## 快速开始
+## Quick start
 
-### 1. 编译
+### 1. Build
 
 ```bash
 go build -o burrow-server ./cmd/burrow-server
 go build -o burrow-agent ./cmd/burrow-agent
 ```
 
-### 2. 启动 server（Mac）
+### 2. Start the server (Mac)
 
 ```bash
-# 自动拉起 cloudflared quick tunnel（推荐，URL 会打印在日志里）
-./burrow-server --tunnel --proxy 127.0.0.1:8080
+# Auto-starts a cloudflared quick tunnel (recommended; URL printed in logs)
+./burrow-server --tunnel --vless 127.0.0.1:8443
 
-# 已有公网 IP / 域名：不需要 tunnel
-./burrow-server --proxy 127.0.0.1:8080 --listen 0.0.0.0:9000
+# Already have a public IP / domain: no tunnel needed
+./burrow-server --vless 127.0.0.1:8443 --listen 0.0.0.0:9000
 ```
 
-常用参数：
-
-| 参数 | 默认 | 说明 |
+| Flag | Default | Description |
 |---|---|---|
-| `--listen` | `127.0.0.1:9000` | 控制面监听地址（/ws, /fetch, /debug） |
-| `--proxy` | `127.0.0.1:8080` | 本地 HTTP 代理监听地址，空字符串禁用 |
-| `--tunnel` | `false` | 自动启动 `cloudflared tunnel --url` |
-| `--cloudflared` | `cloudflared` | cloudflared 二进制路径 |
-| `--verbose` | `false` | 显示完整的 cloudflared 日志（默认只显示错误） |
-| `--token` | `""` | agent 认证口令，空为不认证 |
-| `--domain` | `""` | 公网域名（用于 TLS/ACME，预留） |
-| `--debug` | `false` | 暴露 /debug 和 /fetch（或 `TUNNEL_DEBUG=1`） |
+| `--listen` | `127.0.0.1:9000` | Control-plane listen addr (`/ws`, `/fetch`, `/debug`) |
+| `--proxy` | `127.0.0.1:8080` | Local HTTP proxy listen addr; empty disables |
+| `--socks5` | `127.0.0.1:1080` | SOCKS5 listen addr; empty disables |
+| `--vless` | `""` | VLESS listen addr; empty disables |
+| `--trojan` | `""` | Trojan listen addr; empty disables |
+| `--tunnel` | `false` | Auto-start `cloudflared tunnel --url` |
+| `--cloudflared` | `cloudflared` | Path to cloudflared binary |
+| `--token` | `""` | Agent auth token; empty = no auth |
+| `--install-ca` | `false` | Install embedded Hatch egress CA and exit |
+| `--debug` | `false` | Expose `/debug` and `/fetch` (or `TUNNEL_DEBUG=1`) |
 
-### 3. 启动 agent（VM）
+### 3. Start the agent (VM)
 
 ```bash
 ./burrow-agent \
@@ -59,44 +62,64 @@ go build -o burrow-agent ./cmd/burrow-agent
   --upstream http://198.19.0.1:3128
 ```
 
-| 参数 | 说明 |
+| Flag | Description |
 |---|---|
-| `--server` | server 的 WebSocket 地址（`ws(s)://host/ws`） |
-| `--upstream` | VM 出站用的 HTTP CONNECT 代理；空为直连 |
-| `--token` | 与 server 一致的口令 |
+| `--server` | Server WebSocket URL (`ws(s)://host/ws`) |
+| `--upstream` | HTTP CONNECT proxy for VM egress; empty = direct |
+| `--token` | Must match server's `--token` |
 
-agent 断线自动重连（指数退避，最大 30s）。
+Auto-reconnects on drop (exponential backoff, max 30s).
 
-### 4. 浏览器设置代理
+### 4. Use it
 
-HTTP/HTTPS 代理填 `127.0.0.1:8080`，然后访问 https://api.ipify.org，
-看到的不再是你本地 IP，而是 VM 的出口 IP。
+Set your browser's HTTP proxy to `127.0.0.1:8080`, visit https://api.ipify.org —
+the IP shown is the VM's egress, not yours. Or import the printed VLESS URL
+into tunnet / Shadowrocket / Streisand.
 
-## 协议
+## For Muse users
 
-`internal/proto` 定义了 WebSocket 上的消息：
+- [docs/muse.md](docs/muse.md) — nanny-level tutorial (Chinese): you on the Mac,
+  your agent in the VM, step by step.
+- [docs/muse-en.md](docs/muse-en.md) — same in English.
 
-- **Text 帧**：JSON 控制消息
-  - `fetch` / `fetch_result`：单次 HTTP 请求（供 `/fetch` 调试接口和普通 HTTP 代理）
-  - `connect` / `connect_result`：打开一条 TCP 流（供 HTTPS `CONNECT`）
-  - `close`：关闭流；`hello` / `hello_ack`：握手认证
-- **Binary 帧**：流数据，格式 `[idLen(1)][streamID][payload]`
+## Agent skills
 
-`internal/ws` 是零依赖的 WebSocket 帧实现（server 端 hijack / client 端握手），
-`internal/cloudflared` 负责拉起并解析 quick tunnel URL。
+- `skills/burrow-server/SKILL.md` — for an agent on your Mac (build, tunnel,
+  CA install, verify).
+- `skills/burrow-agent/SKILL.md` — for your Muse agent in the VM
+  (build, connect, report egress IP).
 
-## 测试
+## Protocol
+
+`internal/proto` defines the WebSocket messages:
+
+- **Text frames**: JSON control messages —
+  `fetch` / `fetch_result`, `connect` / `connect_result`,
+  `close`, `hello` / `hello_ack`
+- **Binary frames**: stream data as `[idLen(1)][streamID][payload]`
+
+`internal/ws` is a zero-dependency WebSocket implementation
+(server-side hijack / client-side handshake);
+`internal/cloudflared` spawns quick tunnel and parses its URL.
+
+## Testing
 
 ```bash
 go test ./...
 go vet ./...
 ```
 
-## 安全注意
+## Security notes
 
-这是 PoC 级别的隧道，生产使用前请补齐：
+This is PoC-grade. Before production use:
 
-- `--token` 口令认证（已支持，默认关闭）
-- server 只监听本机（默认 `127.0.0.1`，不要轻易改 `0.0.0.0`）
-- `/fetch` 是无认证的 SSRF 接口，公网部署时请关闭或加鉴权
-- 建议再加：连接数/流量限制、TLS 证书固定、审计日志
+- `--token` auth (supported, off by default)
+- Server binds loopback by default — don't change to `0.0.0.0` lightly
+- `/fetch` is an unauthenticated SSRF endpoint — keep it off public networks
+- Consider: connection/rate limits, cert pinning, audit logging
+
+## Untested
+
+- VLESS over TLS inbound (coded, not E2E-tested)
+- Trojan inbound (coded, not E2E-tested)
+- Non-Muse-VM restricted environments (same principle, not verified)
