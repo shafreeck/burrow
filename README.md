@@ -1,11 +1,15 @@
 # burrow
 
-把一台**没有公网出口、只能走 HTTP CONNECT 代理**的机器（如沙箱 VM），
-通过 WebSocket 隧道变成你本地浏览器的出口。
+把一台**只能主动出站、没有公网入口**的机器，通过 WebSocket 反向隧道变成你的代理出口。
+
+> **实测场景**：Muse 沙箱 VM。VM 的所有出站 TCP 被强制改写到 `198.19.0.1:3128`
+>（HTTP CONNECT 代理，HTTPS 还会被 MITM），UDP 全禁。`burrow-agent` 跑在 VM 里，
+>经沙箱代理拨出 WebSocket 连回 `burrow-server`，浏览器流量就从 VM 出口走了。
+>其他受限环境（公司内网、NAT 后的机器）原理相同，但暂未实测。
 
 ```
 浏览器
-  ↓  127.0.0.1:8080 (本地 HTTP 代理)
+  ↓  127.0.0.1:8080 (本地 HTTP 代理) / :1080 (SOCKS5) / :8443 (VLESS)
 burrow-server (你 Mac / 公网机器)
   ↓  WebSocket (wss, 可经 Cloudflare Tunnel)
 burrow-agent (VM)
