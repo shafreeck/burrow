@@ -108,7 +108,8 @@ certificate files, or use `--tunnel`. Tunnel mode rejects local ACME/cert flags.
 | `--restore-system-proxy` | `false` | Restore the saved proxy settings after an unclean exit |
 | `--cloudflared` | `cloudflared` | Path to cloudflared binary |
 | `--token` | `""` | Agent auth token; empty = no auth |
-| `--install-ca` | `false` | Install embedded Hatch egress CA and exit |
+| `--install-ca` | `false` | Install an egress root CA and exit; use `--ca-cert` to select the file |
+| `--ca-cert` | `""` | Root CA PEM exported from the current VM, used with `--install-ca`; empty uses the bundled CA snapshot |
 | `--debug` | `false` | Expose `/debug` and `/fetch` (or `TUNNEL_DEBUG=1`) |
 
 ### 3. Start the agent (VM)
@@ -125,7 +126,13 @@ certificate files, or use `--tunnel`. Tunnel mode rejects local ACME/cert flags.
 | `--upstream` | HTTP CONNECT proxy for VM egress; empty = direct |
 | `--token` | Must match server's `--token` |
 
-Auto-reconnects on drop (exponential backoff, max 30s).
+Reconnects with backoff of 1, 2, 4, 8, 16, then 30 seconds. Updated peers negotiate
+application heartbeats: the agent sends a ping every 10 seconds and closes the
+session if its matching pong is missing for 20 seconds. The server removes an
+agent after 45 seconds without a heartbeat. With older servers, the agent falls
+back to WebSocket ping, which only checks transport liveness; upgrade both ends
+for application checks. Heartbeats detect dead sessions; reconnecting still
+requires working network routes.
 
 ### 4. Use it
 
@@ -133,6 +140,55 @@ If started with `--bind http://127.0.0.1:18080`, set your browser's HTTP proxy t
 address and visit https://api.ipify.org —
 the IP shown is the VM's egress, not yours. Or import the printed VLESS URL
 into tunnet / Shadowrocket / Streisand.
+
+### VM egress CA
+
+The sandbox egress re-signs HTTPS certificates. `ERR_CERT_AUTHORITY_INVALID`
+means the current certificate chain is untrusted; it does not establish expiry.
+Different VMs or egress instances may have identically named CAs with different
+keys. A single installation is not guaranteed to work forever, and we have not
+established that the CA changes on every connection.
+
+Ask the agent inside the current VM to export its egress root CA from the VM's
+trust store and report the SHA-256 fingerprint. Compare the transferred file
+with that fingerprint, then install it:
+
+```bash
+openssl x509 -in current-egress-ca.crt -noout -subject -dates -fingerprint -sha256
+sudo ./burrow-server --install-ca --ca-cert ./current-egress-ca.crt
+```
+
+This trusts certificates issued by that CA. The installer accepts one currently
+valid, self-signed root and prints its fingerprint before installation. A matching
+name is insufficient; do not trust a root solely because an untrusted TLS peer
+sent it. Without `--ca-cert`, the installer uses the bundled CA snapshot and
+asks you to verify its fingerprint against the current VM. The bundled root was
+updated on 2026-09-29; its SHA-256 fingerprint is
+`A9:D6:3E:7B:EC:DC:BD:21:0D:EC:22:A3:73:7E:17:CF:E4:E7:7F:CA:E2:99:00:96:02:3E:F2:E1:50:1E:1D:77`.
+macOS uses the System keychain; Linux uses
+`update-ca-certificates`; other platforms export the file for manual installation.
+
+### TUN mode and reconnect failures
+
+If enabling TUN disconnects the agent and disabling it restores service, exclude
+`cloudflared` and `burrow-server` from the TUN client or route those processes
+directly. DNS used by cloudflared must also work independently of burrow.
+Cloudflare Tunnel uses TCP/UDP 7844; see its
+[published destinations](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/tunnel-with-firewall/).
+
+The server attempts direct egress for `argotunnel.com`, `cftunnel.com`,
+`trycloudflare.com` and their subdomains, plus the specific Global/US IPv4/IPv6
+tunnel addresses on port 7844. HTTP CONNECT, SOCKS5, VLESS TCP/MUX and Trojan TCP
+check this before depending on an agent. MUX can carry bootstrap traffic while
+offline and selects the current agent for each new stream after reconnect.
+macOS/Linux attempt physical interface binding; Windows relies on OS routes.
+The address list can change. DNS, other regions, and TUN implementations that
+ignore interface binding still need client rules.
+
+For a fixed tunnel, use origin `http://127.0.0.1:9000` to match the default IPv4
+listener. `localhost` may resolve to `::1`, causing Cloudflare 502 responses.
+`reconnecting` means an attempt is pending; `websocket connected and authenticated`
+confirms a successful connection.
 
 ### Optional desktop proxy configuration
 
@@ -184,7 +240,7 @@ to the control plane; VLESS/Trojan TCP clients use their separate `--bind` ports
 
 - **Text frames**: JSON control messages —
   `fetch` / `fetch_result`, `connect` / `connect_result`,
-  `close`, `hello` / `hello_ack`
+  `close`, `hello` / `hello_ack`, `ping` / `pong` (negotiated application heartbeats)
 - **Binary frames**: stream data as `[idLen(1)][streamID][payload]`
 
 `internal/ws` is a zero-dependency WebSocket implementation

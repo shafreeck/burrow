@@ -117,14 +117,19 @@ If it can't connect: check the URL for typos and that the server terminal
 from Step 3 is still open. An expired URL (server was restarted) is the most
 common cause — copy the fresh one and send it again.
 
-## Step 5: Install the certificate (Mac, once)
+## Step 5: Install the current VM's egress CA (Mac)
 
 The VM's egress MITMs HTTPS, so your browser will show certificate errors.
-Fix: trust the issuing CA. **Open a new terminal tab** and run:
+Ask the agent in the current VM to export `Hatch Sandbox Egress CA` from that
+VM's trust store and report its SHA-256 fingerprint. Save the certificate as
+`current-egress-ca.crt`. CAs may differ between egress instances despite sharing
+the same name; the rotation schedule is not established. Compare fingerprints
+before installing. **Open a new terminal tab** and run:
 
 ```bash
 cd ~/burrow
-sudo ./burrow-server --install-ca
+openssl x509 -in current-egress-ca.crt -noout -subject -dates -fingerprint -sha256
+sudo ./burrow-server --install-ca --ca-cert ./current-egress-ca.crt
 ```
 
 Enter your Mac login password (nothing shows while typing, press Enter after).
@@ -142,7 +147,11 @@ Verify:
 security find-certificate -c "Hatch Sandbox Egress CA" /Library/Keychains/System.keychain
 ```
 
-Output = installed.
+Output only proves a certificate with that name exists. Its SHA-256 fingerprint
+must match the current VM's CA. Omitting `--ca-cert` installs the bundled CA;
+its current fingerprint is in the [README](../README.md#vm-egress-ca).
+Verify that it matches the current VM. Do not trust a root solely because an
+untrusted connection sent it, or disable TLS verification to hide the mismatch.
 
 ## Step 6: Set up your browser (Mac)
 
@@ -173,7 +182,8 @@ the server supports it).
    (Step 4's message with the new URL)
 3. Browser proxy stays on — just use it
 
-The CA installs once and never again.
+Reinstallation is unnecessary while the egress CA fingerprint stays the same.
+Recheck it after changing VMs or egress instances if trust errors return.
 
 ---
 
@@ -186,16 +196,23 @@ is the usual suspect). VM broken too → the sandbox egress proxy
 `198.19.0.1:3128` may be flaky; wait a few minutes and retry.
 
 **Browser still shows certificate errors on HTTPS?**
-The CA from Step 5 isn't installed right, or the browser wasn't fully
-restarted after installing. Quit Chrome completely and reopen.
+Compare the current VM's CA fingerprint with the installed CA. Identical names
+can refer to different keys, and `ERR_CERT_AUTHORITY_INVALID` does not establish
+expiry. Once the correct CA is installed, fully quit and reopen the browser.
+
+**Enabling TUN disconnects the agent, disabling it restores service?**
+Exclude `cloudflared` and `burrow-server` from TUN or route those processes
+directly. DNS must work independently of burrow. Heartbeats trigger reconnects
+but cannot repair a routing loop. See [TUN troubleshooting](../README.md#tun-mode-and-reconnect-failures).
 
 **No "Agent connection" in the server terminal?**
 Wait 30 seconds. Still nothing → look for `cloudflared` errors in the
 terminal, or just ask your agent to take a look.
 
 **Can I skip manually forwarding the URL every time?**
-Quick Tunnel URLs change on every restart — that's Cloudflare's free tier.
-A fixed domain is possible if you own one (separate topic).
+With an existing fixed Cloudflare Tunnel, use `--tunnel --domain your.domain`
+and route it to `http://127.0.0.1:9000`. The agent keeps using `wss://your.domain/ws`.
+Automatically created Quick Tunnel URLs change on restart.
 
 **Can my traffic be seen?**
 Path: browser → server on your Mac → Cloudflare tunnel →

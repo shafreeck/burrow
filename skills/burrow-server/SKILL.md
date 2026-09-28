@@ -55,16 +55,20 @@ Wait for this block in the log:
    (as `wss://` — the agent skill handles the scheme swap, but mention it).
 2. The `VLESS URL` line printed earlier (`vless://...`) — for their VLESS client.
 
-Keep the server running. **Every restart generates a new Public URL** —
-tell the user to re-forward it to their VM agent.
+Keep the server running. A Quick Tunnel gets a new URL on restart; a configured
+fixed tunnel keeps its hostname. Only forward a replacement URL when it changed.
 
-### 3. Install the CA (once per machine)
+### 3. Install the current VM's CA
 
 The VM's egress does TLS MITM, so the user's browser needs to trust the
-`Hatch Sandbox Egress CA`:
+egress CA. Ask the VM agent to export the root from its trust store and report
+its SHA-256 fingerprint. Compare the transferred file with that fingerprint.
+The CA name alone is insufficient: different roots can share the name
+`Hatch Sandbox Egress CA`. Do not assume a fixed lifetime or per-session rotation.
 
 ```bash
-sudo ./burrow-server --install-ca
+openssl x509 -in current-egress-ca.crt -noout -subject -dates -fingerprint -sha256
+sudo ./burrow-server --install-ca --ca-cert ./current-egress-ca.crt
 ```
 
 Warn the user: this trusts a CA that can issue certs for any site.
@@ -75,6 +79,10 @@ security find-certificate -c "Hatch Sandbox Egress CA" /Library/Keychains/System
 ```
 
 (Linux: the flag writes to `/usr/local/share/ca-certificates/`.)
+The command without `--ca-cert` uses the bundled CA snapshot; its fingerprint
+is documented in README. Verify that it matches the current VM.
+Do not automatically trust a root captured from a
+failing TLS connection. Finding a certificate by name does not verify its key.
 
 ### 4. Help the user verify
 
@@ -86,9 +94,18 @@ security find-certificate -c "Hatch Sandbox Egress CA" /Library/Keychains/System
 
 ### 5. TUN mode
 
-If the user runs a TUN VPN (e.g. tunnet's TUN mode), no extra config needed:
-the server auto-bypasses `*.trycloudflare.com` / `*.argotunnel.com` traffic
-to a direct local connection so cloudflared doesn't loop back into the tunnel.
+If TUN disconnects the agent, configure the TUN client to exclude `cloudflared`
+and `burrow-server` or route those processes directly. DNS for cloudflared must
+also work without the burrow agent. Do not promise that TUN needs no configuration.
+
+The server attempts direct egress for Cloudflare Tunnel domains and the published
+Global/US tunnel IPs on port 7844, including VLESS MUX while no agent is connected.
+macOS/Linux attempt physical interface binding; Windows relies on OS routes.
+Other destinations or TUN implementations may require explicit exclusions.
+Heartbeats detect stale sessions and trigger reconnects, but do not repair routes.
+
+For fixed tunnels, match the origin to the listener: `http://127.0.0.1:9000`
+for the default IPv4 binding. `localhost` can resolve to `::1` and yield 502.
 
 ## Operating Rules
 

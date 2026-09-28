@@ -88,15 +88,23 @@ type Data struct {
 
 // Hello is sent by the agent on connect.
 type Hello struct {
-	Type    string `json:"type"` // "hello"
-	Token   string `json:"token,omitempty"`
-	Version string `json:"version"`
+	Type      string `json:"type"` // "hello"
+	Token     string `json:"token,omitempty"`
+	Version   string `json:"version"`
+	Heartbeat bool   `json:"heartbeat,omitempty"` // application ping/pong support
 }
 
 // HelloAck answers Hello.
 type HelloAck struct {
-	Type string `json:"type"` // "hello_ack"
-	OK   bool   `json:"ok"`
+	Type      string `json:"type"` // "hello_ack"
+	OK        bool   `json:"ok"`
+	Heartbeat bool   `json:"heartbeat,omitempty"`
+}
+
+// Heartbeat echoes an ID so unrelated traffic cannot hide a broken round trip.
+type Heartbeat struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
 }
 
 // EncodeDataFrame builds a binary data frame: [idLen(1)][id][payload].

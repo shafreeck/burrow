@@ -40,19 +40,22 @@ type Config struct {
 
 // Agent is the tunnel agent.
 type Agent struct {
-	cfg  Config
-	logf func(string, ...interface{})
+	cfg               Config
+	logf              func(string, ...interface{})
+	heartbeatInterval time.Duration
+	heartbeatTimeout  time.Duration
 }
 
 // Each WebSocket session owns its streams, including dials still in progress.
 // A late dial from an old session must never survive a reconnect.
 type session struct {
 	*Agent
-	ctx     context.Context
-	cancel  context.CancelFunc
-	mu      sync.Mutex
-	streams map[string]*agentStream
-	closed  bool
+	ctx       context.Context
+	cancel    context.CancelFunc
+	mu        sync.Mutex
+	streams   map[string]*agentStream
+	closed    bool
+	heartbeat *heartbeat
 }
 
 type agentStream struct {
@@ -64,8 +67,10 @@ func New(cfg Config) *Agent {
 		cfg.Logf = log.Printf
 	}
 	return &Agent{
-		cfg:  cfg,
-		logf: cfg.Logf,
+		cfg:               cfg,
+		logf:              cfg.Logf,
+		heartbeatInterval: 10 * time.Second,
+		heartbeatTimeout:  20 * time.Second,
 	}
 }
 
@@ -281,8 +286,8 @@ func (a *Agent) runOnce(ctx context.Context) error {
 	defer wsc.Close()
 
 	// hello
-	hello, _ := json.Marshal(map[string]string{
-		"type": proto.TypeHello, "token": a.cfg.Token, "version": "1",
+	hello, _ := json.Marshal(proto.Hello{
+		Type: proto.TypeHello, Token: a.cfg.Token, Version: "1", Heartbeat: true,
 	})
 	if err := wsc.WriteText(hello); err != nil {
 		return err
@@ -291,10 +296,7 @@ func (a *Agent) runOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("hello: %w", err)
 	}
-	var ack struct {
-		Type string `json:"type"`
-		OK   bool   `json:"ok"`
-	}
+	var ack proto.HelloAck
 	if op != ws.OpText || json.Unmarshal(payload, &ack) != nil || ack.Type != proto.TypeHelloAck || !ack.OK {
 		return fmt.Errorf("hello rejected or invalid acknowledgement")
 	}
@@ -303,10 +305,22 @@ func (a *Agent) runOnce(ctx context.Context) error {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &session{Agent: a, ctx: sessionCtx, cancel: cancel, streams: make(map[string]*agentStream)}
 	defer s.close()
+	if !ack.Heartbeat {
+		a.log("server lacks application heartbeat; using WebSocket ping (upgrade server for end-to-end checks)")
+	}
+	s.heartbeat = a.startHeartbeat(sessionCtx, wsc, ack.Heartbeat, s.close)
+	defer func() {
+		cancel()
+		wsc.Close()
+		<-s.heartbeat.done
+	}()
 
 	for {
 		op, payload, err := wsc.ReadFrame()
 		if err != nil {
+			if heartbeatErr := s.heartbeat.err(); heartbeatErr != nil {
+				return heartbeatErr
+			}
 			return err
 		}
 		switch op {
@@ -316,6 +330,10 @@ func (a *Agent) runOnce(ctx context.Context) error {
 			s.onText(wsc, payload)
 		case ws.OpBinary:
 			s.onBinary(wsc, payload)
+		case ws.OpPong:
+			if !ack.Heartbeat {
+				s.heartbeat.pong(string(payload))
+			}
 		}
 	}
 }
@@ -327,6 +345,11 @@ func (a *session) onText(wsc *ws.Conn, payload []byte) {
 	}
 	t, _ := msg["type"].(string)
 	switch t {
+	case proto.TypePong:
+		if a.heartbeat != nil {
+			id, _ := msg["id"].(string)
+			a.heartbeat.pong(id)
+		}
 	case proto.TypeHelloAck:
 		if ok, _ := msg["ok"].(bool); !ok {
 			a.log("hello rejected (bad token?)")

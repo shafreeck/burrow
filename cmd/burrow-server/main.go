@@ -115,13 +115,17 @@ func run() (runErr error) {
 	acmeEmail := flag.String("acme-email", "", "email for Let's Encrypt account (with --domain)")
 	acmeStaging := flag.Bool("acme-staging", false, "use Let's Encrypt staging (testing)")
 	debug := flag.Bool("debug", false, "expose /debug and /fetch endpoints (or TUNNEL_DEBUG=1)")
-	installCA := flag.Bool("install-ca", false, "install embedded Hatch sandbox egress CA to system trust store and exit")
+	installCA := flag.Bool("install-ca", false, "install egress root CA to system trust store and exit (use --ca-cert for the current VM)")
+	caCert := flag.String("ca-cert", "", "root CA PEM file for --install-ca; empty uses the bundled Hatch CA snapshot")
 	flag.Parse()
+	if *caCert != "" && !*installCA {
+		return fmt.Errorf("--ca-cert requires --install-ca; use --tls-cert for a server TLS certificate")
+	}
 	if *restoreProxy {
 		return systemproxy.RestoreSaved()
 	}
 	if *installCA {
-		if err := ca.Install(); err != nil {
+		if err := ca.Install(*caCert); err != nil {
 			return fmt.Errorf("install-ca: %w", err)
 		}
 		return nil

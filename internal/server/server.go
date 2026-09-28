@@ -48,15 +48,18 @@ type Server struct {
 	pendingMu sync.Mutex
 	pending   map[string]*pendingRequest
 
-	streamsMu  sync.Mutex
-	streams    map[string]*stream
-	agentReady chan struct{}
-	readyOnce  sync.Once
+	streamsMu        sync.Mutex
+	streams          map[string]*stream
+	agentReady       chan struct{}
+	readyOnce        sync.Once
+	heartbeatTimeout time.Duration
+	directDial       func(string, int) (net.Conn, error)
 }
 
 type agentConn struct {
-	id string
-	ws *ws.Conn
+	id        string
+	ws        *ws.Conn
+	heartbeat *time.Timer
 }
 
 type stream struct {
@@ -88,12 +91,14 @@ func New(cfg Config) *Server {
 		cfg.Logf = log.Printf
 	}
 	return &Server{
-		cfg:        cfg,
-		logf:       cfg.Logf,
-		agents:     make(map[string]*agentConn),
-		pending:    make(map[string]*pendingRequest),
-		streams:    make(map[string]*stream),
-		agentReady: make(chan struct{}),
+		cfg:              cfg,
+		logf:             cfg.Logf,
+		agents:           make(map[string]*agentConn),
+		pending:          make(map[string]*pendingRequest),
+		streams:          make(map[string]*stream),
+		agentReady:       make(chan struct{}),
+		heartbeatTimeout: 45 * time.Second,
+		directDial:       dialDirect,
 	}
 }
 
@@ -161,8 +166,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	ack, _ := json.Marshal(map[string]interface{}{
-		"type": proto.TypeHelloAck, "ok": true,
+	heartbeatEnabled, _ := hello["heartbeat"].(bool)
+	ack, _ := json.Marshal(proto.HelloAck{
+		Type: proto.TypeHelloAck, OK: true, Heartbeat: heartbeatEnabled,
 	})
 	if err := c.WriteText(ack); err != nil {
 		c.Close()
@@ -178,40 +184,52 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	s.log("agent connected id=%s total=%d", id, n)
 	s.readyOnce.Do(func() { close(s.agentReady) })
 
-	defer func() {
-		s.mu.Lock()
-		delete(s.agents, id)
-		n := len(s.agents)
-		s.mu.Unlock()
-		c.Close()
-		// fail streams on this agent
-		s.streamsMu.Lock()
-		var dead []*stream
-		for sid, st := range s.streams {
-			if st.agent == ac {
-				delete(s.streams, sid)
-				dead = append(dead, st)
+	var closeOnce sync.Once
+	cleanup := func() {
+		closeOnce.Do(func() {
+			s.mu.Lock()
+			delete(s.agents, id)
+			n := len(s.agents)
+			s.mu.Unlock()
+			c.Close()
+			// fail streams on this agent
+			s.streamsMu.Lock()
+			var dead []*stream
+			for sid, st := range s.streams {
+				if st.agent == ac {
+					delete(s.streams, sid)
+					dead = append(dead, st)
+				}
 			}
-		}
-		s.streamsMu.Unlock()
-		for _, st := range dead {
-			st.close()
-		}
-		// fail pending requests on this agent
-		s.pendingMu.Lock()
-		for pid, req := range s.pending {
-			if req.agent != ac {
-				continue
+			s.streamsMu.Unlock()
+			for _, st := range dead {
+				st.close()
 			}
-			delete(s.pending, pid)
-			select {
-			case req.reply <- map[string]interface{}{"error": "agent disconnected"}:
-			default:
+			// fail pending requests on this agent
+			s.pendingMu.Lock()
+			for pid, req := range s.pending {
+				if req.agent != ac {
+					continue
+				}
+				delete(s.pending, pid)
+				select {
+				case req.reply <- map[string]interface{}{"error": "agent disconnected"}:
+				default:
+				}
 			}
-		}
-		s.pendingMu.Unlock()
-		s.log("agent disconnected id=%s total=%d", id, n)
-	}()
+			s.pendingMu.Unlock()
+			s.log("agent disconnected id=%s total=%d", id, n)
+		})
+	}
+	defer cleanup()
+	if heartbeatEnabled {
+		ac.heartbeat = time.AfterFunc(s.heartbeatTimeout, func() {
+			s.log("agent heartbeat timeout id=%s", id)
+			// Run cleanup here, even if dispatch is blocked by a slow stream.
+			cleanup()
+		})
+		defer ac.heartbeat.Stop()
+	}
 
 	for {
 		op, payload, err := c.ReadFrame()
@@ -269,6 +287,18 @@ func (s *Server) onText(ac *agentConn, payload []byte) {
 	}
 	t, _ := msg["type"].(string)
 	switch t {
+	case proto.TypePing:
+		id, _ := msg["id"].(string)
+		if id == "" {
+			return
+		}
+		if ac.heartbeat != nil {
+			ac.heartbeat.Reset(s.heartbeatTimeout)
+		}
+		pong, _ := json.Marshal(proto.Heartbeat{Type: proto.TypePong, ID: id})
+		if err := ac.ws.WriteText(pong); err != nil {
+			ac.ws.Close()
+		}
 	case proto.TypeFetchResult, proto.TypeConnectResult:
 		if id, ok := msg["id"].(string); ok {
 			s.pendingMu.Lock()
@@ -429,10 +459,10 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cloudflare edge bypass (TUN loop fix)
-	if isCloudflareEdge(host) {
+	if isCloudflareEdge(host, atoi(port)) {
 		p, _ := strconv.Atoi(port)
 		s.log("http-proxy: cloudflare edge %s:%d, dialing direct", host, p)
-		target, derr := dialDirect(host, p)
+		target, derr := s.directDial(host, p)
 		if derr != nil {
 			http.Error(w, "Direct dial failed", 502)
 			return

@@ -58,15 +58,25 @@ curl -s https://api.ipify.org
 Tell the user this IP — it's the egress IP their browser traffic will come from.
 They can compare it with what they see in their browser to confirm the tunnel works.
 
+### 5. Provide the current egress CA when needed
+
+If the user's browser reports `ERR_CERT_AUTHORITY_INVALID`, inspect this VM's
+trust store and export its current egress root CA public certificate. Report its
+SHA-256 fingerprint and validity dates. The user can compare the transferred file
+before installing it with `burrow-server --install-ca --ca-cert <file>`.
+Do not assume the root embedded in burrow still matches, or that the CA rotates
+on every connection. Matching names alone do not prove matching certificates.
+
 ## Operating Rules
 
 1. **Never ask the user for proxy credentials.** `198.19.0.1:3128` needs no auth.
    If the user offers passwords or tokens, refuse — you don't need them.
 2. **The `--upstream` is fixed**: `http://198.19.0.1:3128`. Do not guess other proxies.
-3. **Reconnect is automatic** (exponential backoff, max 30s). If the log shows
-   repeated `connecting...` without `websocket connected`, the server URL is
-   likely expired — ask the user for a fresh one (burrow-server prints a new
-   Quick Tunnel URL on every restart).
+3. **Reconnect is automatic** (exponential backoff, max 30s). Updated peers use
+   application heartbeats (10s interval, 20s pong timeout); upgrade both ends.
+   For repeated attempts, use the logged error to check DNS, proxy/TLS, server
+   origin and TUN routes. Quick Tunnel URLs change on restart; configured fixed
+   hostnames do not. `websocket connected and authenticated` confirms a connection.
 4. **Do not modify the repo's source** to "fix" connection issues. The failure
    is almost always the URL or the server not running.
 5. **Keep the agent running** for the duration the user needs it. If the process

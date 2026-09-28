@@ -57,10 +57,10 @@ func (s *Server) handleTrojan(c net.Conn, password string) {
 	}
 
 	// Cloudflare edge bypass (TUN loop fix)
-	if isCloudflareEdge(host) {
+	if isCloudflareEdge(host, atoi(portStr)) {
 		port := atoi(portStr)
 		s.log("trojan: cloudflare edge %s:%d, dialing direct", host, port)
-		target, derr := dialDirect(host, port)
+		target, derr := s.directDial(host, port)
 		if derr != nil {
 			s.log("trojan: direct dial failed: %v", derr)
 			return

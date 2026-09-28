@@ -53,10 +53,10 @@ func (s *Server) handleSOCKS5(c net.Conn) {
 	}
 
 	// Cloudflare edge bypass (TUN loop fix)
-	if isCloudflareEdge(host) {
+	if isCloudflareEdge(host, atoi(portStr)) {
 		port := atoi(portStr)
 		s.log("socks5: cloudflare edge %s:%d, dialing direct", host, port)
-		target, derr := dialDirect(host, port)
+		target, derr := s.directDial(host, port)
 		if derr != nil {
 			socks5.WriteReply(c, socks5.RepFailure)
 			return

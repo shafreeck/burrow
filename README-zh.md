@@ -101,7 +101,8 @@ TLS 证书同时应用于控制面、VLESS 和 Trojan 入站，HTTP/SOCKS 代理
 | `--restore-system-proxy` | `false` | 从上次异常退出留下的快照恢复代理，然后退出 |
 | `--cloudflared` | `cloudflared` | cloudflared 二进制路径 |
 | `--token` | `""` | agent 认证口令，空为不认证 |
-| `--install-ca` | `false` | 安装内嵌 Hatch 出口 CA 后退出 |
+| `--install-ca` | `false` | 安装出口根 CA 后退出；配合 `--ca-cert` 指定文件 |
+| `--ca-cert` | `""` | 配合 `--install-ca` 安装当前 VM 导出的根 CA；省略时使用内嵌版本，需核对指纹 |
 | `--debug` | `false` | 暴露 /debug 和 /fetch（或 `TUNNEL_DEBUG=1`） |
 
 ### 3. 启动 agent（VM）
@@ -118,13 +119,57 @@ TLS 证书同时应用于控制面、VLESS 和 Trojan 入站，HTTP/SOCKS 代理
 | `--upstream` | VM 出站用的 HTTP CONNECT 代理；空为直连 |
 | `--token` | 与 server 一致的口令 |
 
-agent 断线自动重连（指数退避，最大 30s）。
+agent 断线自动重连（1、2、4、8、16、30 秒退避，最大 30 秒）。新版 agent 每隔
+10 秒发送一次应用层 ping，20 秒内未收到对应 pong 就关闭旧会话并重连；
+server 45 秒收不到 agent 心跳时清理失联会话。连接旧 server 时降级为
+WebSocket ping，只能检测传输连接，建议双方一起升级。
+
+心跳能发现旧连接失效；若 TUN 路由形成循环，重连仍需要先恢复底层连通性。
 
 ### 4. 开始用
 
 若启动时指定了 `--bind http://127.0.0.1:18080`，浏览器 HTTP 代理填相同地址，访问 https://api.ipify.org，
 看到的 IP 是 VM 的出口 IP，不是你本地的。或把打印的 VLESS URL 导入
 tunnet / Shadowrocket / Streisand。
+
+### VM 出口 CA
+
+沙箱出口会重签 HTTPS 证书。`ERR_CERT_AUTHORITY_INVALID` 表示当前签发链
+不受浏览器信任，不能据此认定证书过期。不同 VM/出口可能使用同名但不同密钥的 CA；
+不能承诺安装一次永久有效，也没有证据表明每次连接都会更换。
+
+先让 VM 中的 agent 从该 VM 的信任库导出当前出口的根 CA 公钥证书，并报告
+SHA-256 指纹。在 Mac 上核对收到的文件，再安装：
+
+```bash
+openssl x509 -in current-egress-ca.crt -noout -subject -dates -fingerprint -sha256
+sudo ./burrow-server --install-ca --ca-cert ./current-egress-ca.crt
+```
+
+安装会信任该 CA 为网站签发的证书。程序只接受一张有效期内的自签名根 CA，
+安装前打印指纹。仅有相同名称不足以证明是同一张 CA；不能直接信任从报错连接抓到的证书。
+不传 `--ca-cert` 会安装内嵌 CA，并提示核对当前 VM 的指纹。
+内嵌版本已于 2026-09-29 更新，SHA-256 为
+`A9:D6:3E:7B:EC:DC:BD:21:0D:EC:22:A3:73:7E:17:CF:E4:E7:7F:CA:E2:99:00:96:02:3E:F2:E1:50:1E:1D:77`。
+macOS 写入系统钥匙串；Linux 使用 `update-ca-certificates`；其他平台导出文件供手动安装。
+
+### TUN 模式与断线排查
+
+如果开启 TUN 后 agent 失联，关闭后恢复，应在 TUN 客户端中把 `cloudflared`
+和 `burrow-server` 进程设为直连/排除，并确保 cloudflared 的 DNS 解析不依赖 burrow。
+这避免隧道自身依赖尚未连上的 agent。Cloudflare Tunnel 使用 TCP/UDP 7844，
+详细目标见 [Cloudflare 官方列表](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/tunnel-with-firewall/)。
+
+server 会对 `argotunnel.com`、`cftunnel.com`、`trycloudflare.com` 及子域名尝试直接出站，
+也识别官方 Global/US 列表中的具体 IPv4/IPv6 地址（仅 7844 端口）。
+HTTP CONNECT、SOCKS5、VLESS TCP/MUX、Trojan TCP 都在等待 agent 前判断绕行；
+MUX 在 agent 离线时仍可处理隧道恢复流量，并为新流选择重连后的 agent。
+macOS/Linux 尝试绑定物理接口；Windows 依赖系统路由。地址列表可能变化，
+DNS、其他区域或不遵循接口绑定的 TUN 实现仍需客户端规则，不能保证免配置。
+
+固定隧道回源用 `http://127.0.0.1:9000` 与默认 IPv4 监听匹配；`localhost`
+可能解析为 `::1`，导致 Cloudflare 502。日志中的 `reconnecting` 表示正在尝试，
+`websocket connected and authenticated` 才表示已完成连接认证。
 
 ### 可选：自动设置桌面系统代理
 
@@ -183,7 +228,7 @@ Cloudflare Tunnel 的 HTTP 回源规则仍指向控制面；VLESS/Trojan 的 TCP
 
 - **Text 帧**：JSON 控制消息 —
   `fetch` / `fetch_result`、`connect` / `connect_result`、
-  `close`、`hello` / `hello_ack`
+  `close`、`hello` / `hello_ack`、`ping` / `pong`（协商应用层心跳）
 - **Binary 帧**：流数据，格式 `[idLen(1)][streamID][payload]`
 
 `internal/ws` 是零依赖的 WebSocket 实现（server 端 hijack / client 端握手），

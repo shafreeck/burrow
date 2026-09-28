@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net"
@@ -10,11 +11,86 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/shafreeck/burrow/internal/proto"
 	"github.com/shafreeck/burrow/internal/ws"
 )
+
+// Keep TCP and WebSocket control frames alive while the first application
+// session stops responding, as can happen behind a proxy after a route change.
+func TestReconnectAfterSilentSessionFailure(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "request recovered")
+	}))
+	defer target.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	var connections atomic.Int32
+	recovered := make(chan map[string]interface{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := ws.ServerHandshake(w, r)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		stop := context.AfterFunc(ctx, func() { c.Close() })
+		defer stop()
+		if _, _, err := c.ReadFrame(); err != nil {
+			return
+		}
+		n := connections.Add(1)
+		c.WriteText([]byte(`{"type":"hello_ack","ok":true,"heartbeat":true}`))
+		if n > 1 {
+			fetch, _ := json.Marshal(proto.Fetch{Type: proto.TypeFetch, ID: "recovery-check", URL: target.URL})
+			c.WriteText(fetch)
+		}
+		for {
+			_, raw, err := c.ReadFrame()
+			if err != nil {
+				return
+			}
+			if n == 1 {
+				continue // No FIN/RST: silently discard all application messages.
+			}
+			var msg map[string]interface{}
+			if json.Unmarshal(raw, &msg) != nil {
+				continue
+			}
+			if msg["type"] == proto.TypePing {
+				pong, _ := json.Marshal(map[string]interface{}{"type": proto.TypePong, "id": msg["id"]})
+				c.WriteText(pong)
+			}
+			if msg["type"] == proto.TypeFetchResult {
+				select {
+				case recovered <- msg:
+				default:
+				}
+			}
+		}
+	}))
+	a := New(Config{ServerURL: "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws", Logf: t.Logf})
+	a.heartbeatInterval = 50 * time.Millisecond
+	a.heartbeatTimeout = 200 * time.Millisecond
+	done := make(chan struct{})
+	go func() { a.RunContext(ctx); close(done) }()
+	defer func() {
+		cancel()
+		<-done
+		srv.Close()
+	}()
+	select {
+	case result := <-recovered:
+		body, _ := result["body"].(string)
+		decoded, _ := base64.StdEncoding.DecodeString(body)
+		if result["status"] != float64(200) || string(decoded) != "request recovered" || connections.Load() < 2 {
+			t.Fatalf("request did not recover: %v", result)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatalf("silent session never reconnected; established connections=%d", connections.Load())
+	}
+}
 
 func TestCONNECTProxyAuthenticationAndBufferedData(t *testing.T) {
 	verified := make(chan bool, 1)

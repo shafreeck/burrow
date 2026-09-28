@@ -114,14 +114,19 @@ websocket connected
 如果 agent 说连不上：先检查 URL 有没有复制错、server 那头的终端是不是还开着。
 URL 过期是最常见的原因（server 重启过），重新复制新的发给它。
 
-## 第 5 步：装证书（Mac，只做一次）
+## 第 5 步：安装当前 VM 出口的 CA（Mac）
 
 VM 的出口会对 HTTPS 做中间人（签发假证书），你的浏览器会报证书错误。
-解决办法是信任签发它的 CA。在 Mac 终端**新开一个标签页**运行：
+先让 VM 里的 agent 从**当前 VM 的信任库**导出 `Hatch Sandbox Egress CA`
+公钥证书，并给出 SHA-256 指纹。将文件保存为 `current-egress-ca.crt`，在 Mac
+上核对指纹后安装。CA 可能随出口变化；同名不代表同一张证书，轮换周期尚未确认。
+
+在 Mac 终端**新开一个标签页**运行：
 
 ```bash
 cd ~/burrow
-sudo ./burrow-server --install-ca
+openssl x509 -in current-egress-ca.crt -noout -subject -dates -fingerprint -sha256
+sudo ./burrow-server --install-ca --ca-cert ./current-egress-ca.crt
 ```
 
 输入你的 Mac 登录密码（输的时候不显示，输完回车）。
@@ -139,7 +144,10 @@ sudo ./burrow-server --install-ca
 security find-certificate -c "Hatch Sandbox Egress CA" /Library/Keychains/System.keychain
 ```
 
-有输出就是装上了。
+有输出仅证明该名称的证书存在；必须核对 SHA-256 指纹是否与当前 VM 一致。
+不带 `--ca-cert` 会安装内嵌 CA，其当前指纹见 [README](../README-zh.md#vm-出口-ca)。
+仍需核对它是否匹配当前 VM。不要直接信任从报错连接
+抓到的 CA，也不要用关闭 TLS 校验来替代安装正确的 CA。
 
 ## 第 6 步：配浏览器（Mac）
 
@@ -167,7 +175,7 @@ tunnet 实测可用，它默认开 MUX，server 端已经支持。
 2. 把新的 Public URL 发给 agent，让它重跑 burrow-agent（第 4 步那段话，换 URL）
 3. 浏览器代理开着，直接用
 
-CA 只装一次，以后不用重装。
+出口 CA 的指纹没变就无需重装；换 VM/出口后如果再次出现信任错误，重新核对。
 
 ---
 
@@ -179,15 +187,23 @@ VM 里通、浏览器不通 → 查你浏览器的代理设置（IP/端口填错
 VM 里也不通 → 沙箱出口代理 `198.19.0.1:3128` 可能抖了，等几分钟重试。
 
 **Q：访问 HTTPS 网站，浏览器还是报证书错误？**
-A：第 5 步的 CA 没装好，或者装完没重启浏览器。Chrome 要完全退出重开。
+A：先核对当前 VM 的 CA 与 Mac 已安装 CA 的 SHA-256 指纹。即使名称相同，
+密钥也可能不同；`ERR_CERT_AUTHORITY_INVALID` 不等于证书过期。
+确认安装的是当前 CA 后，再完全退出并重开浏览器。
+
+**Q：开启 TUN 后 agent 掉线，关闭就恢复？**
+A：把 `cloudflared` 和 `burrow-server` 在 TUN 客户端中设为直连/排除，
+确保 DNS 不依赖 burrow。升级后的心跳能触发重连，但不能修复仍然循环的路由。
+具体绕行范围见 [README](../README-zh.md#tun-模式与断线排查)。
 
 **Q：server 终端里没有出现 "Agent connection"？**
 A：等 30 秒。还没有的话，看终端里有没有 `cloudflared` 的报错发给你的 agent 看，
 或者直接问它。
 
 **Q：能不能不每次手动发 URL 给 agent？**
-A：目前 Quick Tunnel 的 URL 每次重启都变，这是 Cloudflare 免费版的限制。
-以后可以考虑固定域名方案（需要你自己有域名，另说）。
+A：已有固定 Cloudflare Tunnel 时，使用 `--tunnel --domain 你的域名`，
+发布规则指向 `http://127.0.0.1:9000`。agent 继续使用同一条 `wss://域名/ws`。
+只有自动创建的 Quick Tunnel 才会在重启后更换 URL。
 
 **Q：流量会被看到吗？**
 A：你的流量路径是：浏览器 → 你 Mac 上的 server → Cloudflare 隧道 →

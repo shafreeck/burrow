@@ -69,11 +69,10 @@ func (s *Server) handleVLESS(c net.Conn) {
 	// Cloudflare edge bypass: if the target is cloudflared's control plane
 	// (and TUN is looping it back into us), dial directly via the physical
 	// interface instead of forwarding through the agent tunnel.
-	// This breaks the TUN loop without requiring sudo or user configuration.
-	if req.Command == vless.CmdTCP && isCloudflareEdge(host) {
+	if req.Command == vless.CmdTCP && isCloudflareEdge(host, atoi(portStr)) {
 		port := atoi(portStr)
 		s.log("vless: cloudflare edge %s:%d detected, dialing direct (bypass tunnel)", host, port)
-		target, derr := dialDirect(host, port)
+		target, derr := s.directDial(host, port)
 		if derr != nil {
 			s.log("vless: direct dial %s:%d failed: %v", host, port, derr)
 			return
@@ -100,15 +99,15 @@ func (s *Server) handleVLESS(c net.Conn) {
 		return
 	}
 
+	// MUX: multiplexed sessions over a single VLESS connection.
+	// Allow bootstrap traffic before an agent is available.
+	if req.Command == vless.CmdMux {
+		s.handleVLESSMux(c)
+		return
+	}
 	ac := s.waitAgent(10 * time.Second)
 	if ac == nil {
 		s.log("vless: no agent connected")
-		return
-	}
-
-	// MUX: multiplexed sessions over a single VLESS connection.
-	if req.Command == vless.CmdMux {
-		s.handleVLESSMux(c, ac)
 		return
 	}
 
@@ -160,13 +159,12 @@ func (s *Server) handleVLESS(c net.Conn) {
 // handleVLESSMux handles a VLESS MUX (mux.cool) connection.
 // Multiple logical TCP streams are multiplexed over the single client connection.
 // Each MUX session (sid) maps to an independent tunnel stream through the agent.
-// handleVLESSMux handles a VLESS MUX (mux.cool) connection.
-func (s *Server) handleVLESSMux(c net.Conn, ac *agentConn) {
+func (s *Server) handleVLESSMux(c net.Conn) {
 	// VLESS handshake OK.
 	if err := vless.WriteResponse(c); err != nil {
 		return
 	}
-	s.handleMuxConn(c, c, ac, "vless")
+	s.handleMuxConn(c, c, "vless")
 }
 
 // relayUDP relays VLESS UDP between the client TCP connection and a direct

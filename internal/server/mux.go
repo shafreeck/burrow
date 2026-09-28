@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -13,7 +14,7 @@ import (
 )
 
 // handleMuxConn handles TCP Mux.Cool sessions. UDP/XUDP is not implemented.
-func (s *Server) handleMuxConn(c net.Conn, r io.Reader, ac *agentConn, protoName string) {
+func (s *Server) handleMuxConn(c net.Conn, r io.Reader, protoName string) {
 	type muxSession struct {
 		sid    uint16
 		stream *stream
@@ -65,7 +66,7 @@ func (s *Server) handleMuxConn(c net.Conn, r io.Reader, ac *agentConn, protoName
 		}
 		data := proto.Data{Type: proto.TypeData, ID: sess.stream.id, Payload: base64.StdEncoding.EncodeToString(payload)}
 		raw, _ := json.Marshal(data)
-		return ac.ws.WriteText(raw)
+		return sess.stream.agent.ws.WriteText(raw)
 	}
 	for {
 		frame, err := vless.ReadMuxFrame(r)
@@ -85,10 +86,17 @@ func (s *Server) handleMuxConn(c net.Conn, r io.Reader, ac *agentConn, protoName
 				return
 			}
 			sess = &muxSession{sid: frame.SessionID}
-			if isCloudflareEdge(host) {
-				sess.direct, err = dialDirect(host, atoi(port))
+			if isCloudflareEdge(host, atoi(port)) {
+				sess.direct, err = s.directDial(host, atoi(port))
 			} else {
-				sess.stream, err = s.openAgentStream(ac, host, atoi(port))
+				// Use the currently connected agent for each new logical stream.
+				// Do not block the MUX reader while offline: later frames may be
+				// cloudflared bootstrap traffic needed to restore that agent.
+				if ac := s.pickAgent(); ac != nil {
+					sess.stream, err = s.openAgentStream(ac, host, atoi(port))
+				} else {
+					err = fmt.Errorf("no agent connected")
+				}
 			}
 			if err != nil {
 				s.log("%s mux: %v", protoName, err)

@@ -128,8 +128,8 @@ func (c *Conn) lock()   { <-c.wmu }
 func (c *Conn) unlock() { c.wmu <- struct{}{} }
 
 // ReadFrame reads one frame. Returns opcode and payload.
-// Handles ping (auto pong) and close transparently by returning them;
-// caller decides. Fragmentation is not supported (tunnel never fragments).
+// Answers ping automatically; returns pong and close to the caller.
+// Fragmentation is not supported (tunnel never fragments).
 func (c *Conn) ReadFrame() (opcode int, payload []byte, err error) {
 	for {
 		op, p, err := c.readOne()
@@ -138,10 +138,10 @@ func (c *Conn) ReadFrame() (opcode int, payload []byte, err error) {
 		}
 		switch op {
 		case OpPing:
-			_ = c.WritePong(p)
+			if err := c.WritePong(p); err != nil {
+				return 0, nil, err
+			}
 			continue
-		case OpPong:
-			continue // ignore
 		default:
 			return op, p, nil
 		}
@@ -256,6 +256,9 @@ func (c *Conn) WriteBinary(p []byte) error { return c.writeFrame(OpBinary, p) }
 
 // WritePong answers a ping.
 func (c *Conn) WritePong(p []byte) error { return c.writeFrame(OpPong, p) }
+
+// WritePing checks transport liveness when the peer lacks application heartbeats.
+func (c *Conn) WritePing(p []byte) error { return c.writeFrame(OpPing, p) }
 
 // WriteClose sends a close frame and closes the underlying conn.
 func (c *Conn) WriteClose() error {
