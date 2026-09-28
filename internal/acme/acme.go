@@ -259,6 +259,7 @@ func (c *Client) ObtainCert(domain string, challengeSrv func(token, keyAuth stri
 		return nil, nil, err
 	}
 	var auth struct {
+		Status     string `json:"status"`
 		Challenges []struct {
 			Type   string `json:"type"`
 			URL    string `json:"url"`
@@ -272,54 +273,61 @@ func (c *Client) ObtainCert(domain string, challengeSrv func(token, keyAuth stri
 	}
 	resp.Body.Close()
 
-	var challURL, token string
-	for _, ch := range auth.Challenges {
-		if ch.Type == "http-01" {
-			challURL = ch.URL
-			token = ch.Token
-			break
+	// If already valid (e.g. cached from a previous run), skip the challenge.
+	if auth.Status != "valid" {
+		var challURL, token string
+		for _, ch := range auth.Challenges {
+			if ch.Type == "http-01" {
+				challURL = ch.URL
+				token = ch.Token
+				break
+			}
 		}
-	}
-	if challURL == "" {
-		return nil, nil, fmt.Errorf("acme: no http-01 challenge")
-	}
+		if challURL == "" {
+			types := make([]string, 0, len(auth.Challenges))
+			for _, ch := range auth.Challenges {
+				types = append(types, ch.Type+":"+ch.Status)
+			}
+			return nil, nil, fmt.Errorf("acme: no http-01 challenge (auth status=%s, challenges=%v)", auth.Status, types)
+		}
 
-	// 3. Compute key authorization.
-	jwk, err := c.jwk()
-	if err != nil {
-		return nil, nil, err
-	}
-	jwkJSON, _ := json.Marshal(jwk)
-	jwkHash := sha256.Sum256(jwkJSON)
-	thumbprint := base64.RawURLEncoding.EncodeToString(jwkHash[:])
-	keyAuth := token + "." + thumbprint
-
-	// 4. Serve challenge and notify ACME server.
-	challengeSrv(token, keyAuth)
-	time.Sleep(500 * time.Millisecond) // let server start
-
-	_, err = c.post(challURL, map[string]interface{}{})
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// 5. Poll authorization until valid.
-	for i := 0; i < 30; i++ {
-		time.Sleep(2 * time.Second)
-		resp, err := c.post(order.Authorizations[0], nil)
+		// 3. Compute key authorization.
+		jwk, err := c.jwk()
 		if err != nil {
-			continue
+			return nil, nil, err
 		}
-		var a struct {
-			Status string `json:"status"`
+		jwkJSON, _ := json.Marshal(jwk)
+		jwkHash := sha256.Sum256(jwkJSON)
+		thumbprint := base64.RawURLEncoding.EncodeToString(jwkHash[:])
+		keyAuth := token + "." + thumbprint
+
+		// 4. Serve challenge and notify ACME server.
+		challengeSrv(token, keyAuth)
+		time.Sleep(500 * time.Millisecond) // let server start
+
+		_, err = c.post(challURL, map[string]interface{}{})
+		if err != nil {
+			return nil, nil, err
 		}
-		json.NewDecoder(resp.Body).Decode(&a)
-		resp.Body.Close()
-		if a.Status == "valid" {
-			break
-		}
-		if a.Status == "invalid" {
-			return nil, nil, fmt.Errorf("acme: challenge invalid")
+
+		// 5. Poll authorization until valid.
+		for i := 0; i < 30; i++ {
+			time.Sleep(2 * time.Second)
+			resp, err := c.post(order.Authorizations[0], nil)
+			if err != nil {
+				continue
+			}
+			var a struct {
+				Status string `json:"status"`
+			}
+			json.NewDecoder(resp.Body).Decode(&a)
+			resp.Body.Close()
+			if a.Status == "valid" {
+				break
+			}
+			if a.Status == "invalid" {
+				return nil, nil, fmt.Errorf("acme: challenge invalid")
+			}
 		}
 	}
 
