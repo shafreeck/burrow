@@ -29,14 +29,18 @@ Needs Go 1.21+ and `cloudflared` on PATH (`brew install cloudflared` on Mac).
 ### 2. Start with Quick Tunnel
 
 ```bash
-./burrow-server --tunnel --vless 127.0.0.1:8443
+./burrow-server --tunnel --bind vless://127.0.0.1:8443
 ```
+
+This enables only VLESS. All proxy inbounds are disabled by default; enable
+only those the user needs. For a browser HTTP proxy, also pass
+`--bind http://127.0.0.1:18080`. `--system-proxy` requires this explicit HTTP address.
 
 Wait for this block in the log:
 
 ```
 ============================================================
-  Tunnel is ready!
+  Agent connection
 
   Public URL:  https://xxx.trycloudflare.com
 
@@ -74,7 +78,8 @@ security find-certificate -c "Hatch Sandbox Egress CA" /Library/Keychains/System
 
 ### 4. Help the user verify
 
-- Browser HTTP proxy → `127.0.0.1:8080`, visit https://api.ipify.org.
+- If started with `--bind http://127.0.0.1:18080`, set the browser HTTP proxy to
+  `127.0.0.1:18080` and visit https://api.ipify.org.
   The IP shown should match the egress IP their VM agent reported,
   not their local IP.
 - Or import the VLESS URL into tunnet / Shadowrocket / Streisand.

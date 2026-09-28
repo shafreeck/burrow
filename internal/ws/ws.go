@@ -9,11 +9,14 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Opcodes.
@@ -37,6 +40,7 @@ type Conn struct {
 	serverSide bool
 	wmu        chan struct{} // binary semaphore as mutex
 	closed     chan struct{}
+	closeOnce  sync.Once
 }
 
 // ServerHandshake hijacks w and performs the server side of the WS handshake.
@@ -165,10 +169,11 @@ func (c *Conn) readOne() (int, []byte, error) {
 		if _, err := io.ReadFull(c.rw, ext); err != nil {
 			return 0, nil, err
 		}
-		n = 0
-		for i := 0; i < 8; i++ {
-			n = n<<8 | int(ext[i])
+		length := binary.BigEndian.Uint64(ext)
+		if length > MaxFrameSize {
+			return 0, nil, fmt.Errorf("frame too large: %d > %d", length, MaxFrameSize)
 		}
+		n = int(length)
 	}
 	var mask []byte
 	if masked {
@@ -196,6 +201,9 @@ func (c *Conn) readOne() (int, []byte, error) {
 }
 
 func (c *Conn) writeFrame(op int, payload []byte) error {
+	if len(payload) > MaxFrameSize {
+		return fmt.Errorf("frame too large: %d > %d", len(payload), MaxFrameSize)
+	}
 	c.lock()
 	defer c.unlock()
 	select {
@@ -203,6 +211,8 @@ func (c *Conn) writeFrame(op int, payload []byte) error {
 		return fmt.Errorf("ws closed")
 	default:
 	}
+	c.netConn.SetWriteDeadline(time.Now().Add(15 * time.Second))
+	defer c.netConn.SetWriteDeadline(time.Time{})
 	hdr := []byte{byte(0x80 | op)}
 	n := len(payload)
 	switch {
@@ -255,11 +265,10 @@ func (c *Conn) WriteClose() error {
 
 // Close closes the connection.
 func (c *Conn) Close() error {
-	select {
-	case <-c.closed:
-		return nil
-	default:
+	var err error
+	c.closeOnce.Do(func() {
 		close(c.closed)
-	}
-	return c.netConn.Close()
+		err = c.netConn.Close()
+	})
+	return err
 }

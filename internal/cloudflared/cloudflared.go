@@ -3,11 +3,13 @@ package cloudflared
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os/exec"
 	"regexp"
 	"sync"
+	"time"
 )
 
 // Tunnel wraps a running `cloudflared tunnel --url` process.
@@ -18,6 +20,7 @@ type Tunnel struct {
 	mu     sync.Mutex
 	url    string
 	closed bool
+	cancel context.CancelFunc
 }
 
 var urlRe = regexp.MustCompile(`https://[a-z0-9-]+\.trycloudflare\.com`)
@@ -26,11 +29,23 @@ var urlRe = regexp.MustCompile(`https://[a-z0-9-]+\.trycloudflare\.com`)
 // public URL appears in its log output. Stdout and stderr are consumed
 // concurrently: the URL is printed to stderr, and stdout may never close.
 func Start(cloudflaredBin, target string, logFn func(string)) (*Tunnel, error) {
+	return StartContext(context.Background(), cloudflaredBin, target, logFn)
+}
+
+func StartContext(ctx context.Context, cloudflaredBin, target string, logFn func(string)) (*Tunnel, error) {
+	ctx, cancel := context.WithCancel(ctx)
 	t := &Tunnel{
-		urlCh: make(chan string, 1),
-		errCh: make(chan error, 1),
+		urlCh:  make(chan string, 1),
+		errCh:  make(chan error, 1),
+		cancel: cancel,
 	}
-	t.cmd = exec.Command(cloudflaredBin, "tunnel", "--url", target)
+	started := false
+	defer func() {
+		if !started {
+			cancel()
+		}
+	}()
+	t.cmd = exec.CommandContext(ctx, cloudflaredBin, "tunnel", "--url", target)
 	stderr, err := t.cmd.StderrPipe()
 	if err != nil {
 		return nil, fmt.Errorf("stderr pipe: %w", err)
@@ -52,9 +67,17 @@ func Start(cloudflaredBin, target string, logFn func(string)) (*Tunnel, error) {
 		t.mu.Lock()
 		t.url = url
 		t.mu.Unlock()
+		started = true
 		return t, nil
 	case err := <-t.errCh:
+		if err == nil {
+			err = fmt.Errorf("no tunnel URL was reported")
+		}
 		return nil, fmt.Errorf("cloudflared exited: %w", err)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(45 * time.Second):
+		return nil, fmt.Errorf("cloudflared did not report a tunnel URL within 45 seconds")
 	}
 }
 
@@ -87,7 +110,7 @@ func (t *Tunnel) Stop() error {
 	t.closed = true
 	t.mu.Unlock()
 	if t.cmd.Process != nil {
-		return t.cmd.Process.Kill()
+		t.cancel()
 	}
 	return nil
 }

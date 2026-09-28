@@ -4,6 +4,7 @@ package server
 
 import (
 	"net"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -45,7 +46,7 @@ func physicalInterface() (*net.Interface, error) {
 			continue
 		}
 		name := iface.Name
-		if len(name) >= 3 && (name[:3] == "tun" || name[:3] == "tap" || name[:4] == "utun") {
+		if strings.HasPrefix(name, "tun") || strings.HasPrefix(name, "tap") || strings.HasPrefix(name, "utun") {
 			continue
 		}
 		addrs, err := iface.Addrs()

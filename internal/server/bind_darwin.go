@@ -4,6 +4,7 @@ package server
 
 import (
 	"net"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -22,7 +23,11 @@ func bindToPhysicalInterface(network, address string, c syscall.RawConn) error {
 	var bindErr error
 	err = c.Control(func(fd uintptr) {
 		// IP_BOUND_IF binds the socket to a specific interface index on macOS
-		bindErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_BOUND_IF, iface.Index)
+		if network == "tcp6" || network == "udp6" {
+			bindErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_BOUND_IF, iface.Index)
+		} else {
+			bindErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_BOUND_IF, iface.Index)
+		}
 	})
 	if err != nil {
 		return err
@@ -46,7 +51,7 @@ func physicalInterface() (*net.Interface, error) {
 		}
 		name := iface.Name
 		// Skip TUN/TAP interfaces (utun*, tun*, tap*)
-		if len(name) >= 4 && (name[:4] == "utun" || name[:3] == "tun" || name[:3] == "tap") {
+		if strings.HasPrefix(name, "tun") || strings.HasPrefix(name, "tap") || strings.HasPrefix(name, "utun") {
 			continue
 		}
 		// Must have an IPv4 address

@@ -46,10 +46,12 @@ type Server struct {
 	agents map[string]*agentConn
 
 	pendingMu sync.Mutex
-	pending   map[string]chan map[string]interface{}
+	pending   map[string]*pendingRequest
 
-	streamsMu sync.Mutex
-	streams   map[string]*stream
+	streamsMu  sync.Mutex
+	streams    map[string]*stream
+	agentReady chan struct{}
+	readyOnce  sync.Once
 }
 
 type agentConn struct {
@@ -86,13 +88,17 @@ func New(cfg Config) *Server {
 		cfg.Logf = log.Printf
 	}
 	return &Server{
-		cfg:     cfg,
-		logf:    cfg.Logf,
-		agents:  make(map[string]*agentConn),
-		pending: make(map[string]chan map[string]interface{}),
-		streams: make(map[string]*stream),
+		cfg:        cfg,
+		logf:       cfg.Logf,
+		agents:     make(map[string]*agentConn),
+		pending:    make(map[string]*pendingRequest),
+		streams:    make(map[string]*stream),
+		agentReady: make(chan struct{}),
 	}
 }
+
+// Ready closes after the first authenticated agent connects.
+func (s *Server) Ready() <-chan struct{} { return s.agentReady }
 
 func (s *Server) log(format string, args ...interface{}) {
 	s.logf("[server] "+format, args...)
@@ -170,6 +176,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	n := len(s.agents)
 	s.mu.Unlock()
 	s.log("agent connected id=%s total=%d", id, n)
+	s.readyOnce.Do(func() { close(s.agentReady) })
 
 	defer func() {
 		s.mu.Lock()
@@ -192,10 +199,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 		// fail pending requests on this agent
 		s.pendingMu.Lock()
-		for pid, ch := range s.pending {
+		for pid, req := range s.pending {
+			if req.agent != ac {
+				continue
+			}
 			delete(s.pending, pid)
 			select {
-			case ch <- map[string]interface{}{"error": "agent disconnected"}:
+			case req.reply <- map[string]interface{}{"error": "agent disconnected"}:
 			default:
 			}
 		}
@@ -262,19 +272,29 @@ func (s *Server) onText(ac *agentConn, payload []byte) {
 	case proto.TypeFetchResult, proto.TypeConnectResult:
 		if id, ok := msg["id"].(string); ok {
 			s.pendingMu.Lock()
-			ch := s.pending[id]
+			req := s.pending[id]
+			if req == nil || req.agent != ac {
+				s.pendingMu.Unlock()
+				return
+			}
 			delete(s.pending, id)
 			s.pendingMu.Unlock()
-			if ch != nil {
+			if req != nil {
 				select {
-				case ch <- msg:
+				case req.reply <- msg:
 				default:
 				}
 			}
 		}
 	case proto.TypeClose:
 		if id, ok := msg["id"].(string); ok {
-			s.closeStream(id)
+			s.streamsMu.Lock()
+			st := s.streams[id]
+			if st != nil && st.agent == ac {
+				delete(s.streams, id)
+				st.close()
+			}
+			s.streamsMu.Unlock()
 		}
 	case proto.TypeData:
 		// Stream data via text frame (base64) for Cloudflare Tunnel compat.
@@ -337,7 +357,7 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 	id := newID()
 	ch := make(chan map[string]interface{}, 1)
 	s.pendingMu.Lock()
-	s.pending[id] = ch
+	s.pending[id] = &pendingRequest{agent: ac, reply: ch}
 	s.pendingMu.Unlock()
 
 	req := map[string]interface{}{
@@ -380,8 +400,16 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 
 // ServeProxy runs a blocking HTTP proxy on addr (CONNECT + plain HTTP).
 func (s *Server) ServeProxy(addr string) error {
-	s.log("proxy listening on %s", addr)
-	return http.ListenAndServe(addr, http.HandlerFunc(s.handleProxy))
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	return s.ServeProxyListener(ln)
+}
+
+func (s *Server) ServeProxyListener(ln net.Listener) error {
+	s.log("proxy listening on %s", ln.Addr())
+	return (&http.Server{Handler: http.HandlerFunc(s.handleProxy), ReadHeaderTimeout: 10 * time.Second}).Serve(ln)
 }
 
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
@@ -431,41 +459,13 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "No agent connected", 502)
 		return
 	}
-	streamID := newID()
-	ch := make(chan map[string]interface{}, 1)
-	s.pendingMu.Lock()
-	s.pending[streamID] = ch
-	s.pendingMu.Unlock()
-
-	req := map[string]interface{}{
-		"type": proto.TypeConnect,
-		"id":   streamID,
-		"host": host,
-		"port": atoi(port),
-	}
-	b, _ := json.Marshal(req)
-	if err := ac.ws.WriteText(b); err != nil {
-		s.pendingMu.Lock()
-		delete(s.pending, streamID)
-		s.pendingMu.Unlock()
-		http.Error(w, "send failed", 502)
+	st, err := s.openAgentStream(ac, host, atoi(port))
+	if err != nil {
+		http.Error(w, err.Error(), 502)
 		return
 	}
-	var res map[string]interface{}
-	select {
-	case res = <-ch:
-	case <-time.After(15 * time.Second):
-		s.pendingMu.Lock()
-		delete(s.pending, streamID)
-		s.pendingMu.Unlock()
-		http.Error(w, "Agent timeout", 504)
-		return
-	}
-	if ok, _ := res["ok"].(bool); !ok {
-		msg, _ := res["error"].(string)
-		http.Error(w, "connect failed: "+msg, 502)
-		return
-	}
+	streamID := st.id
+	defer s.endAgentStream(st)
 
 	// Hijack browser connection.
 	hj, ok := w.(http.Hijacker)
@@ -480,23 +480,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	brw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
 	brw.Flush()
 
-	st := &stream{
-		id:    streamID,
-		agent: ac,
-		toNet: make(chan []byte, 64),
-		done:  make(chan struct{}),
-	}
-	s.streamsMu.Lock()
-	s.streams[streamID] = st
-	s.streamsMu.Unlock()
-
-	defer func() {
-		s.closeStream(streamID)
-		bconn.Close()
-		// tell agent
-		msg, _ := json.Marshal(map[string]string{"type": proto.TypeClose, "id": streamID})
-		ac.ws.WriteText(msg)
-	}()
+	defer bconn.Close()
 
 	// browser -> agent. On exit (browser closed or error), tear down the stream.
 	go func() {
@@ -524,12 +508,11 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	// agent -> browser
 	for {
-		select {
-		case data := <-st.toNet:
-			if _, err := bconn.Write(data); err != nil {
-				return
-			}
-		case <-st.done:
+		data, ok := st.receive()
+		if !ok {
+			return
+		}
+		if _, err := bconn.Write(data); err != nil {
 			return
 		}
 	}
@@ -544,7 +527,12 @@ func (s *Server) handlePlainHTTP(w http.ResponseWriter, r *http.Request) {
 	// Read body
 	var body []byte
 	if r.Body != nil {
-		body, _ = io.ReadAll(r.Body)
+		var err error
+		body, err = io.ReadAll(http.MaxBytesReader(w, r.Body, 4<<20))
+		if err != nil {
+			http.Error(w, "Request body exceeds 4 MiB or could not be read", http.StatusRequestEntityTooLarge)
+			return
+		}
 	}
 	headers := map[string]string{}
 	for k, vs := range r.Header {
@@ -555,7 +543,7 @@ func (s *Server) handlePlainHTTP(w http.ResponseWriter, r *http.Request) {
 	id := newID()
 	ch := make(chan map[string]interface{}, 1)
 	s.pendingMu.Lock()
-	s.pending[id] = ch
+	s.pending[id] = &pendingRequest{agent: ac, reply: ch}
 	s.pendingMu.Unlock()
 
 	// Reconstruct absolute URL
@@ -637,12 +625,23 @@ func (s *Server) Handler() http.Handler {
 
 // Serve runs the control-plane HTTP server (blocking).
 func (s *Server) Serve() error {
-	s.log("control plane listening on %s", s.cfg.Listen)
+	ln, err := net.Listen("tcp", s.cfg.Listen)
+	if err != nil {
+		return err
+	}
+	return s.ServeListener(ln)
+}
+
+// ServeListener serves the control plane on an already-bound listener.
+// This lets callers start the origin before bringing up a tunnel.
+func (s *Server) ServeListener(ln net.Listener) error {
+	s.log("control plane listening on %s", ln.Addr())
+	httpServer := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	if s.cfg.TLSCert != "" && s.cfg.TLSKey != "" {
 		s.log("TLS enabled (cert=%s)", s.cfg.TLSCert)
-		return http.ListenAndServeTLS(s.cfg.Listen, s.cfg.TLSCert, s.cfg.TLSKey, s.Handler())
+		return httpServer.ServeTLS(ln, s.cfg.TLSCert, s.cfg.TLSKey)
 	}
-	return http.ListenAndServe(s.cfg.Listen, s.Handler())
+	return httpServer.Serve(ln)
 }
 
 func atoi(s string) int {

@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"io"
 	"net"
 	"time"
@@ -15,11 +14,17 @@ import (
 // Each client connection is parsed as VLESS, then relayed through
 // the tunnel via the existing stream mechanism.
 func (s *Server) ServeVLESS(addr string) error {
-	ln, err := net.Listen("tcp", addr)
+	ln, err := s.listenInbound(addr)
 	if err != nil {
 		return err
 	}
-	s.log("vless listening on %s", addr)
+	defer ln.Close()
+	return s.ServeVLESSListener(ln)
+}
+
+// ServeVLESSListener serves an already-bound listener, including its TLS setup.
+func (s *Server) ServeVLESSListener(ln net.Listener) error {
+	s.log("vless listening on %s", ln.Addr())
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -65,7 +70,7 @@ func (s *Server) handleVLESS(c net.Conn) {
 	// (and TUN is looping it back into us), dial directly via the physical
 	// interface instead of forwarding through the agent tunnel.
 	// This breaks the TUN loop without requiring sudo or user configuration.
-	if req.Command != vless.CmdMux && isCloudflareEdge(host) {
+	if req.Command == vless.CmdTCP && isCloudflareEdge(host) {
 		port := atoi(portStr)
 		s.log("vless: cloudflare edge %s:%d detected, dialing direct (bypass tunnel)", host, port)
 		target, derr := dialDirect(host, port)
@@ -107,40 +112,13 @@ func (s *Server) handleVLESS(c net.Conn) {
 		return
 	}
 
-	streamID := newID()
-	ch := make(chan map[string]interface{}, 1)
-	s.pendingMu.Lock()
-	s.pending[streamID] = ch
-	s.pendingMu.Unlock()
-
-	creq := map[string]interface{}{
-		"type": proto.TypeConnect,
-		"id":   streamID,
-		"host": host,
-		"port": atoi(portStr),
-	}
-	b, _ := json.Marshal(creq)
-	if err := ac.ws.WriteText(b); err != nil {
-		s.pendingMu.Lock()
-		delete(s.pending, streamID)
-		s.pendingMu.Unlock()
+	st, err := s.openAgentStream(ac, host, atoi(portStr))
+	if err != nil {
+		s.log("vless: %v", err)
 		return
 	}
-	var res map[string]interface{}
-	select {
-	case res = <-ch:
-	case <-time.After(15 * time.Second):
-		s.pendingMu.Lock()
-		delete(s.pending, streamID)
-		s.pendingMu.Unlock()
-		s.log("vless: agent timeout for %s", req.Addr)
-		return
-	}
-	if ok, _ := res["ok"].(bool); !ok {
-		msg, _ := res["error"].(string)
-		s.log("vless: connect %s failed: %s", req.Addr, msg)
-		return
-	}
+	streamID := st.id
+	defer s.endAgentStream(st)
 
 	// VLESS handshake OK.
 	if err := vless.WriteResponse(c); err != nil {
@@ -148,22 +126,6 @@ func (s *Server) handleVLESS(c net.Conn) {
 		return
 	}
 	s.log("vless: %s -> %s stream=%s", c.RemoteAddr(), req.Addr, streamID)
-
-	st := &stream{
-		id:    streamID,
-		agent: ac,
-		toNet: make(chan []byte, 64),
-		done:  make(chan struct{}),
-	}
-	s.streamsMu.Lock()
-	s.streams[streamID] = st
-	s.streamsMu.Unlock()
-
-	defer func() {
-		s.closeStream(streamID)
-		msg, _ := json.Marshal(map[string]string{"type": proto.TypeClose, "id": streamID})
-		ac.ws.WriteText(msg)
-	}()
 
 	// client -> agent
 	go func() {
@@ -185,12 +147,11 @@ func (s *Server) handleVLESS(c net.Conn) {
 
 	// agent -> client
 	for {
-		select {
-		case data := <-st.toNet:
-			if _, err := c.Write(data); err != nil {
-				return
-			}
-		case <-st.done:
+		data, ok := st.receive()
+		if !ok {
+			return
+		}
+		if _, err := c.Write(data); err != nil {
 			return
 		}
 	}
@@ -214,7 +175,7 @@ func (s *Server) handleVLESSMux(c net.Conn, ac *agentConn) {
 // Used for cloudflared QUIC under TUN (bypass) and any other UDP,
 // since the VM agent cannot do UDP at all.
 func (s *Server) relayUDP(c net.Conn, addr string) {
-	udpConn, err := net.Dial("udp", addr)
+	udpConn, err := dialDirectNetwork("udp", addr)
 	if err != nil {
 		s.log("vless: udp dial %s failed: %v", addr, err)
 		return
@@ -226,7 +187,13 @@ func (s *Server) relayUDP(c net.Conn, addr string) {
 
 	// Client -> UDP target.
 	go func() {
-		defer func() { select { case <-done: default: c.Close() } }()
+		defer func() {
+			select {
+			case <-done:
+			default:
+				c.Close()
+			}
+		}()
 		hdr := make([]byte, 2)
 		for {
 			if _, err := io.ReadFull(c, hdr); err != nil {

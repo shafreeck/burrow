@@ -1,7 +1,10 @@
 package server
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -33,15 +36,49 @@ func handleACMEChallenge(w http.ResponseWriter, r *http.Request) {
 
 // ObtainCertViaACME obtains a TLS cert for domain via Let's Encrypt HTTP-01.
 // It saves cert.pem and key.pem to certDir, and returns their paths.
-// email is for the ACME account (can be empty). Use staging=true for testing.
-func ObtainCertViaACME(domain, email, certDir string, staging bool, logf func(string, ...interface{})) (certPath, keyPath string, err error) {
+// It serves HTTP-01 on listenAddr for the duration of issuance; public port 80
+// must reach that listener. email can be empty. Use staging=true for testing.
+func ObtainCertViaACME(domain, email, certDir, listenAddr string, staging bool, logf func(string, ...interface{})) (certPath, keyPath string, err error) {
 	dir := acme.DirectoryURL
 	if staging {
 		dir = acme.StagingDirectoryURL
 	}
-	logf("acme: obtaining cert for %s (staging=%v)...", domain, staging)
+	return obtainCertViaACME(domain, email, certDir, listenAddr, dir, logf)
+}
 
-	client, err := acme.New(dir, nil)
+func obtainCertViaACME(domain, email, certDir, listenAddr, directoryURL string, logf func(string, ...interface{})) (certPath, keyPath string, err error) {
+	// Bind synchronously before creating an order. Otherwise the CA can attempt
+	// validation while no HTTP server is listening.
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return "", "", fmt.Errorf("acme HTTP-01 listen %s: %w", listenAddr, err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/acme-challenge/", handleACMEChallenge)
+	httpServer := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		if err := httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
+			logf("acme: challenge server: %v", err)
+		}
+	}()
+	defer func() {
+		httpServer.Close()
+		<-stopped
+	}()
+	var tokens []string
+	defer func() {
+		acmeChallenges.Lock()
+		defer acmeChallenges.Unlock()
+		for _, token := range tokens {
+			delete(acmeChallenges.m, token)
+		}
+	}()
+	logf("acme: HTTP-01 listening on %s", ln.Addr())
+	logf("acme: obtaining cert for %s via %s...", domain, directoryURL)
+
+	client, err := acme.New(directoryURL, nil)
 	if err != nil {
 		return "", "", err
 	}
@@ -53,16 +90,23 @@ func ObtainCertViaACME(domain, email, certDir string, staging bool, logf func(st
 		acmeChallenges.Lock()
 		acmeChallenges.m[token] = keyAuth
 		acmeChallenges.Unlock()
+		tokens = append(tokens, token)
 		logf("acme: challenge ready at /.well-known/acme-challenge/%s", token)
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("acme obtain: %w", err)
 	}
-
-	// Clean up challenge.
-	acmeChallenges.Lock()
-	acmeChallenges.m = make(map[string]string)
-	acmeChallenges.Unlock()
+	pair, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return "", "", fmt.Errorf("acme returned an invalid certificate/key pair: %w", err)
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		return "", "", err
+	}
+	if err := leaf.VerifyHostname(domain); err != nil {
+		return "", "", err
+	}
 
 	if err := os.MkdirAll(certDir, 0700); err != nil {
 		return "", "", err
@@ -75,7 +119,6 @@ func ObtainCertViaACME(domain, email, certDir string, staging bool, logf func(st
 	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
 		return "", "", err
 	}
-	logf("acme: cert saved to %s (renew before %s)", certPath,
-		time.Now().Add(90*24*time.Hour).Format("2006-01-02"))
+	logf("acme: cert saved to %s (expires %s)", certPath, leaf.NotAfter.Format(time.RFC3339))
 	return certPath, keyPath, nil
 }

@@ -72,14 +72,12 @@ func Parse(r io.Reader) (*Request, error) {
 	copy(req.UUID[:], hdr[1:17])
 	addonLen := int(hdr[17])
 	if addonLen > 0 {
-		// Skip addon data (rarely used).
-		if _, err := io.CopyN(io.Discard, r, int64(addonLen)); err != nil {
-			return nil, fmt.Errorf("vless: read addon: %w", err)
-		}
+		return nil, fmt.Errorf("vless: nonempty addons/flows are unsupported (use empty flow)")
 	}
 
-	// Command(1) + Port(2) + AType(1)
-	cmd := make([]byte, 4)
+	// MUX has only a command byte. Reading port/address here would consume
+	// the first three bytes of the following Mux.Cool frame.
+	cmd := make([]byte, 1)
 	if _, err := io.ReadFull(r, cmd); err != nil {
 		return nil, fmt.Errorf("vless: read cmd: %w", err)
 	}
@@ -93,8 +91,15 @@ func Parse(r io.Reader) (*Request, error) {
 		req.Addr = "mux"
 		return &req, nil
 	}
-	port := binary.BigEndian.Uint16(cmd[1:3])
-	atype := cmd[3]
+	addrHeader := make([]byte, 3)
+	if _, err := io.ReadFull(r, addrHeader); err != nil {
+		return nil, fmt.Errorf("vless: read port/address type: %w", err)
+	}
+	port := binary.BigEndian.Uint16(addrHeader[:2])
+	if port == 0 {
+		return nil, fmt.Errorf("vless: port must be nonzero")
+	}
+	atype := addrHeader[2]
 
 	var host string
 	switch atype {
@@ -108,6 +113,9 @@ func Parse(r io.Reader) (*Request, error) {
 		lb := make([]byte, 1)
 		if _, err := io.ReadFull(r, lb); err != nil {
 			return nil, fmt.Errorf("vless: read domain len: %w", err)
+		}
+		if lb[0] == 0 {
+			return nil, fmt.Errorf("vless: empty domain")
 		}
 		b := make([]byte, lb[0])
 		if _, err := io.ReadFull(r, b); err != nil {

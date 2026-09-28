@@ -141,6 +141,9 @@ func ReadMuxFrame(r io.Reader) (*MuxFrame, error) {
 // For server -> client, we typically send Data frames (status=Keep, option=Data)
 // or End frames (status=End).
 func WriteMuxFrame(w io.Writer, sessionID uint16, status, option byte, payload []byte) error {
+	if len(payload) > 65535 {
+		return fmt.Errorf("mux: payload exceeds 65535 bytes")
+	}
 	// Build meta: session_id(2) + status(1) + option(1) = 4 bytes
 	meta := make([]byte, 4)
 	binary.BigEndian.PutUint16(meta[0:2], sessionID)

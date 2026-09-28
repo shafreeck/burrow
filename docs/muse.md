@@ -57,14 +57,17 @@ go build -o burrow-server ./cmd/burrow-server
 ## 第 3 步：启动 server（Mac）
 
 ```bash
-./burrow-server --tunnel --vless 127.0.0.1:8443
+./burrow-server --tunnel --bind vless://127.0.0.1:8443
 ```
+
+这条命令只开启 VLESS。若第 6 步选择浏览器 HTTP 代理，请在启动时加上
+`--bind http://127.0.0.1:18080`。所有代理入站都需要显式指定，默认仅监听控制面。
 
 等 10～20 秒，终端里会出现这样一块：
 
 ```
 ============================================================
-  Tunnel is ready!
+  Agent connection
 
   Public URL:  https://xxx-xxx-xxx.trycloudflare.com
 
@@ -143,7 +146,7 @@ security find-certificate -c "Hatch Sandbox Egress CA" /Library/Keychains/System
 ### 方法 A：浏览器走 HTTP 代理（最简单）
 
 以 Chrome 为例：设置 → 搜索"代理" → 打开代理设置 →
-勾选"网页代理 (HTTP)"，填 `127.0.0.1`，端口 `8080`。
+勾选"网页代理 (HTTP)"，填 `127.0.0.1`，端口 `18080`（启动时需指定 `--bind http://127.0.0.1:18080`）。
 HTTPS 代理也一样填。
 
 然后访问 https://api.ipify.org，页面上显示的 IP：
@@ -178,7 +181,7 @@ VM 里也不通 → 沙箱出口代理 `198.19.0.1:3128` 可能抖了，等几�
 **Q：访问 HTTPS 网站，浏览器还是报证书错误？**
 A：第 5 步的 CA 没装好，或者装完没重启浏览器。Chrome 要完全退出重开。
 
-**Q：server 终端里没有出现 "Tunnel is ready!"？**
+**Q：server 终端里没有出现 "Agent connection"？**
 A：等 30 秒。还没有的话，看终端里有没有 `cloudflared` 的报错发给你的 agent 看，
 或者直接问它。
 

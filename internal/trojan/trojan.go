@@ -2,9 +2,10 @@
 // Trojan: https://trojan-gfw.github.io/trojan/developer/protocol
 //
 // Client sends (over TLS):
-//   hex(SHA224(password)) + "\r\n"
-//   + CMD(1) + ATYP(1) + ADDR + PORT(2) + "\r\n"
-//   + payload...
+//
+//	hex(SHA224(password)) + "\r\n"
+//	+ CMD(1) + ATYP(1) + ADDR + PORT(2) + "\r\n"
+//	+ payload...
 //
 // CMD: 0x01 = TCP CONNECT, 0x03 = UDP ASSOCIATE
 // ATYP: 0x01 = IPv4, 0x03 = Domain, 0x04 = IPv6
@@ -14,6 +15,7 @@ package trojan
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -52,21 +54,10 @@ func VerifyPassword(r io.Reader, password string) error {
 	got := string(buf[:56])
 	want := PasswordHash(password)
 	// Constant-time compare to avoid timing leaks.
-	if !hmacEqual(got, want) {
+	if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
 		return fmt.Errorf("trojan: bad password")
 	}
 	return nil
-}
-
-func hmacEqual(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	var diff byte
-	for i := 0; i < len(a); i++ {
-		diff |= a[i] ^ b[i]
-	}
-	return diff == 0
 }
 
 // ParseRequest reads CMD + ATYP + ADDR + PORT + CRLF after password verification.
@@ -92,6 +83,9 @@ func ParseRequest(r io.Reader) (*Request, error) {
 		if _, err := io.ReadFull(r, lb); err != nil {
 			return nil, fmt.Errorf("trojan: read domain len: %w", err)
 		}
+		if lb[0] == 0 {
+			return nil, fmt.Errorf("trojan: empty domain")
+		}
 		b := make([]byte, lb[0])
 		if _, err := io.ReadFull(r, b); err != nil {
 			return nil, fmt.Errorf("trojan: read domain: %w", err)
@@ -112,6 +106,9 @@ func ParseRequest(r io.Reader) (*Request, error) {
 		return nil, fmt.Errorf("trojan: read port: %w", err)
 	}
 	port := int(portBytes[0])<<8 | int(portBytes[1])
+	if port == 0 {
+		return nil, fmt.Errorf("trojan: port must be nonzero")
+	}
 
 	crlf := make([]byte, 2)
 	if _, err := io.ReadFull(r, crlf); err != nil {

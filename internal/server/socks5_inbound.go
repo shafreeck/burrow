@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"net"
 	"time"
 
@@ -15,7 +14,13 @@ func (s *Server) ServeSOCKS5(addr string) error {
 	if err != nil {
 		return err
 	}
-	s.log("socks5 listening on %s", addr)
+	defer ln.Close()
+	return s.ServeSOCKS5Listener(ln)
+}
+
+// ServeSOCKS5Listener serves an already-bound SOCKS5 listener.
+func (s *Server) ServeSOCKS5Listener(ln net.Listener) error {
+	s.log("socks5 listening on %s", ln.Addr())
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -68,63 +73,20 @@ func (s *Server) handleSOCKS5(c net.Conn) {
 		return
 	}
 
-	streamID := newID()
-	ch := make(chan map[string]interface{}, 1)
-	s.pendingMu.Lock()
-	s.pending[streamID] = ch
-	s.pendingMu.Unlock()
-
-	creq := map[string]interface{}{
-		"type": proto.TypeConnect,
-		"id":   streamID,
-		"host": host,
-		"port": atoi(portStr),
-	}
-	b, _ := json.Marshal(creq)
-	if err := ac.ws.WriteText(b); err != nil {
-		s.pendingMu.Lock()
-		delete(s.pending, streamID)
-		s.pendingMu.Unlock()
+	st, err := s.openAgentStream(ac, host, atoi(portStr))
+	if err != nil {
+		s.log("socks5: %v", err)
 		socks5.WriteReply(c, socks5.RepFailure)
 		return
 	}
-	var res map[string]interface{}
-	select {
-	case res = <-ch:
-	case <-time.After(15 * time.Second):
-		s.pendingMu.Lock()
-		delete(s.pending, streamID)
-		s.pendingMu.Unlock()
-		s.log("socks5: agent timeout for %s", req.Addr)
-		socks5.WriteReply(c, socks5.RepFailure)
-		return
-	}
-	if ok, _ := res["ok"].(bool); !ok {
-		socks5.WriteReply(c, socks5.RepFailure)
-		return
-	}
+	streamID := st.id
+	defer s.endAgentStream(st)
 
 	if err := socks5.WriteReply(c, socks5.RepSuccess); err != nil {
 		s.closeStream(streamID)
 		return
 	}
 	s.log("socks5: %s -> %s stream=%s", c.RemoteAddr(), req.Addr, streamID)
-
-	st := &stream{
-		id:    streamID,
-		agent: ac,
-		toNet: make(chan []byte, 64),
-		done:  make(chan struct{}),
-	}
-	s.streamsMu.Lock()
-	s.streams[streamID] = st
-	s.streamsMu.Unlock()
-
-	defer func() {
-		s.closeStream(streamID)
-		msg, _ := json.Marshal(map[string]string{"type": proto.TypeClose, "id": streamID})
-		ac.ws.WriteText(msg)
-	}()
 
 	go func() {
 		defer s.closeStream(streamID)
@@ -144,12 +106,11 @@ func (s *Server) handleSOCKS5(c net.Conn) {
 	}()
 
 	for {
-		select {
-		case data := <-st.toNet:
-			if _, err := c.Write(data); err != nil {
-				return
-			}
-		case <-st.done:
+		data, ok := st.receive()
+		if !ok {
+			return
+		}
+		if _, err := c.Write(data); err != nil {
 			return
 		}
 	}

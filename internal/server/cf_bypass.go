@@ -38,17 +38,25 @@ func isCloudflareEdge(host string) bool {
 // when a TUN VPN is active on this host.
 func dialDirect(host string, port int) (net.Conn, error) {
 	addr := net.JoinHostPort(host, itoa(port))
+	return dialDirectNetwork("tcp", addr)
+}
 
+func dialDirectNetwork(network, addr string) (net.Conn, error) {
 	dialer := &net.Dialer{
 		Timeout: 15 * time.Second,
 		Control: bindToPhysicalInterface,
+	}
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		if ip := net.ParseIP(host); host == "localhost" || (ip != nil && ip.IsLoopback()) {
+			dialer.Control = nil
+		}
 	}
 
 	// Use context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	return dialer.DialContext(ctx, "tcp", addr)
+	return dialer.DialContext(ctx, network, addr)
 }
 
 // itoa is a simple int-to-string (avoid strconv import cycle concerns).

@@ -38,11 +38,13 @@ const (
 
 // Client is an ACME client.
 type Client struct {
-	dir        string
-	http       *http.Client
-	accountKey crypto.Signer
-	accountURL string
-	nonce      string
+	dir          string
+	http         *http.Client
+	accountKey   crypto.Signer
+	accountURL   string
+	nonce        string
+	pollInterval time.Duration
+	pollAttempts int
 }
 
 // New creates a client. If accountKey is nil, a new ECDSA P-256 key is generated.
@@ -55,9 +57,11 @@ func New(dir string, accountKey crypto.Signer) (*Client, error) {
 		accountKey = k
 	}
 	return &Client{
-		dir:        dir,
-		http:       &http.Client{Timeout: 30 * time.Second},
-		accountKey: accountKey,
+		dir:          dir,
+		http:         &http.Client{Timeout: 30 * time.Second},
+		accountKey:   accountKey,
+		pollInterval: 2 * time.Second,
+		pollAttempts: 30,
 	}, nil
 }
 
@@ -88,8 +92,11 @@ func (c *Client) jwk() (map[string]string, error) {
 	switch k := c.accountKey.(type) {
 	case *ecdsa.PrivateKey:
 		// P-256
-		x := base64.RawURLEncoding.EncodeToString(k.X.Bytes())
-		y := base64.RawURLEncoding.EncodeToString(k.Y.Bytes())
+		if k.Curve != elliptic.P256() {
+			return nil, fmt.Errorf("acme: only P-256 ECDSA keys are supported")
+		}
+		x := base64.RawURLEncoding.EncodeToString(k.X.FillBytes(make([]byte, 32)))
+		y := base64.RawURLEncoding.EncodeToString(k.Y.FillBytes(make([]byte, 32)))
 		return map[string]string{"kty": "EC", "crv": "P-256", "x": x, "y": y}, nil
 	case *rsa.PrivateKey:
 		n := base64.RawURLEncoding.EncodeToString(k.N.Bytes())
@@ -238,10 +245,74 @@ func (c *Client) Register(email string) error {
 
 // ChallengeInfo holds the http-01 challenge details.
 type ChallengeInfo struct {
-	Token          string
-	KeyAuth        string
-	ChallengeURL   string
-	Authorization  string
+	Token         string
+	KeyAuth       string
+	ChallengeURL  string
+	Authorization string
+}
+
+type problem struct {
+	Type   string `json:"type"`
+	Detail string `json:"detail"`
+}
+
+type authorization struct {
+	Status     string `json:"status"`
+	Challenges []struct {
+		Type   string   `json:"type"`
+		URL    string   `json:"url"`
+		Token  string   `json:"token"`
+		Status string   `json:"status"`
+		Error  *problem `json:"error"`
+	} `json:"challenges"`
+}
+
+func (a authorization) failure() error {
+	for _, ch := range a.Challenges {
+		if ch.Type == "http-01" && ch.Error != nil {
+			return fmt.Errorf("acme: HTTP-01 challenge %s: %s (type=%s)", a.Status, ch.Error.Detail, ch.Error.Type)
+		}
+	}
+	return fmt.Errorf("acme: authorization %s", a.Status)
+}
+
+func (c *Client) waitAuthorization(url string) error {
+	var lastErr error
+	var status string
+	for i := 0; i < c.pollAttempts; i++ {
+		if i > 0 {
+			time.Sleep(c.pollInterval)
+		}
+		resp, err := c.post(url, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if err := checkResponse(resp, "pollAuthorization"); err != nil {
+			lastErr = err
+			continue
+		}
+		var auth authorization
+		err = json.NewDecoder(resp.Body).Decode(&auth)
+		resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("acme: decode authorization: %w", err)
+		}
+		status = auth.Status
+		lastErr = nil
+		switch status {
+		case "valid":
+			return nil
+		case "pending", "processing":
+			// The CA is still checking the challenge.
+		default:
+			return auth.failure()
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("acme: authorization polling exhausted: %w", lastErr)
+	}
+	return fmt.Errorf("acme: authorization did not become valid (status=%s)", status)
 }
 
 // ObtainCert obtains a certificate for domain via http-01.
@@ -288,15 +359,7 @@ func (c *Client) ObtainCert(domain string, challengeSrv func(token, keyAuth stri
 	if err := checkResponse(resp, "getAuthorization"); err != nil {
 		return nil, nil, err
 	}
-	var auth struct {
-		Status     string `json:"status"`
-		Challenges []struct {
-			Type   string `json:"type"`
-			URL    string `json:"url"`
-			Token  string `json:"token"`
-			Status string `json:"status"`
-		} `json:"challenges"`
-	}
+	var auth authorization
 	if err := json.NewDecoder(resp.Body).Decode(&auth); err != nil {
 		resp.Body.Close()
 		return nil, nil, err
@@ -305,6 +368,9 @@ func (c *Client) ObtainCert(domain string, challengeSrv func(token, keyAuth stri
 
 	// If already valid (e.g. cached from a previous run), skip the challenge.
 	if auth.Status != "valid" {
+		if auth.Status != "pending" {
+			return nil, nil, auth.failure()
+		}
 		var challURL, token string
 		for _, ch := range auth.Challenges {
 			if ch.Type == "http-01" {
@@ -333,7 +399,6 @@ func (c *Client) ObtainCert(domain string, challengeSrv func(token, keyAuth stri
 
 		// 4. Serve challenge and notify ACME server.
 		challengeSrv(token, keyAuth)
-		time.Sleep(500 * time.Millisecond) // let server start
 
 		cresp, err := c.post(challURL, map[string]interface{}{})
 		if err != nil {
@@ -345,28 +410,8 @@ func (c *Client) ObtainCert(domain string, challengeSrv func(token, keyAuth stri
 		cresp.Body.Close()
 
 		// 5. Poll authorization until valid.
-		for i := 0; i < 30; i++ {
-			time.Sleep(2 * time.Second)
-			resp, err := c.post(order.Authorizations[0], nil)
-			if err != nil {
-				continue
-			}
-			if err := checkResponse(resp, "pollAuthorization"); err != nil {
-				// Don't fail the poll on transient errors; retry.
-				// (checkResponse already closed the body on error)
-				continue
-			}
-			var a struct {
-				Status string `json:"status"`
-			}
-			json.NewDecoder(resp.Body).Decode(&a)
-			resp.Body.Close()
-			if a.Status == "valid" {
-				break
-			}
-			if a.Status == "invalid" {
-				return nil, nil, fmt.Errorf("acme: challenge invalid")
-			}
+		if err := c.waitAuthorization(order.Authorizations[0]); err != nil {
+			return nil, nil, err
 		}
 	}
 
@@ -397,8 +442,10 @@ func (c *Client) ObtainCert(domain string, challengeSrv func(token, keyAuth stri
 
 	// 8. Poll order until valid, get certificate URL.
 	var certURL string
-	for i := 0; i < 30; i++ {
-		time.Sleep(2 * time.Second)
+	for i := 0; i < c.pollAttempts; i++ {
+		if i > 0 {
+			time.Sleep(c.pollInterval)
+		}
 		resp, err := c.post(orderURL, nil)
 		if err != nil {
 			continue

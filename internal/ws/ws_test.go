@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"net"
+	"sync"
 	"testing"
 )
 
@@ -11,6 +12,29 @@ import (
 func pipeConn() (net.Conn, net.Conn) {
 	a, b := net.Pipe()
 	return a, b
+}
+
+func TestFrameLengthOverflow(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	c := newConn(b, rwFor(b), true)
+	go a.Write([]byte{0x82, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+	if _, _, err := c.ReadFrame(); err == nil {
+		t.Fatal("overflowing frame length accepted")
+	}
+}
+
+func TestConcurrentClose(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
+	c := newConn(a, rwFor(a), true)
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); c.Close() }()
+	}
+	wg.Wait()
 }
 
 func rwFor(c net.Conn) *bufio.ReadWriter {

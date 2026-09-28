@@ -54,14 +54,33 @@ func TestParseBadVersion(t *testing.T) {
 	}
 }
 
-func TestParseUDPRejected(t *testing.T) {
+func TestParseUDP(t *testing.T) {
 	buf := []byte{0x00}
 	buf = append(buf, bytes.Repeat([]byte{0}, 16)...)
 	buf = append(buf, 0x00)
 	buf = append(buf, CmdUDP)
 	buf = append(buf, 0x00, 0x35, ATypeIPv4, 8, 8, 8, 8)
-	if _, err := Parse(bytes.NewReader(buf)); err != ErrBadCommand {
-		t.Errorf("err = %v, want ErrBadCommand", err)
+	req, err := Parse(bytes.NewReader(buf))
+	if err != nil || req.Command != CmdUDP || req.Addr != "8.8.8.8:53" {
+		t.Fatalf("Parse UDP = %+v, %v", req, err)
+	}
+}
+
+func TestParseMuxPreservesFirstFrame(t *testing.T) {
+	for _, payload := range [][]byte{nil, {0, 4, 0, 1, MuxKeepAlive, 0}} {
+		header := append(make([]byte, 18), CmdMux)
+		r := bytes.NewReader(append(header, payload...))
+		req, err := Parse(r)
+		if err != nil || req.Command != CmdMux || r.Len() != len(payload) {
+			t.Fatalf("Parse MUX = %+v, %v; remaining=%d want=%d", req, err, r.Len(), len(payload))
+		}
+	}
+}
+
+func TestParseUnknownCommand(t *testing.T) {
+	header := append(make([]byte, 18), 0xff)
+	if _, err := Parse(bytes.NewReader(header)); err != ErrBadCommand {
+		t.Fatalf("unknown command = %v", err)
 	}
 }
 

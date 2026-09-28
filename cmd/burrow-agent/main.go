@@ -31,12 +31,16 @@ func main() {
 	}
 
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	ag := agent.New(agent.Config{
+	cfg := agent.Config{
 		ServerURL:     *serverURL,
 		Token:         *token,
 		UpstreamProxy: *upstream,
 		InsecureTLS:   *insecure,
 		Logf:          func(f string, a ...interface{}) { log.Printf(f, a...) },
-	})
+	}
+	if err := cfg.Validate(); err != nil {
+		log.Fatal(err)
+	}
+	ag := agent.New(cfg)
 	ag.Run()
 }

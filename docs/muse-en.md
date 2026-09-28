@@ -58,14 +58,18 @@ of a few MB exists.
 ## Step 3: Start the server (Mac)
 
 ```bash
-./burrow-server --tunnel --vless 127.0.0.1:8443
+./burrow-server --tunnel --bind vless://127.0.0.1:8443
 ```
+
+This enables only VLESS. For the HTTP browser proxy in Step 6, also pass
+`--bind http://127.0.0.1:18080` when starting the server. All proxy inbounds require
+an explicit address; only the control plane listens by default.
 
 Wait 10–20 seconds. You'll see:
 
 ```
 ============================================================
-  Tunnel is ready!
+  Agent connection
 
   Public URL:  https://xxx-xxx-xxx.trycloudflare.com
 
@@ -145,7 +149,8 @@ Output = installed.
 ### Option A: browser HTTP proxy (simplest)
 
 Chrome: Settings → search "proxy" → open proxy settings →
-check "Web Proxy (HTTP)", fill `127.0.0.1`, port `8080`.
+check "Web Proxy (HTTP)", fill `127.0.0.1`, port `18080`
+(start the server with `--bind http://127.0.0.1:18080`).
 Do the same for Secure Web Proxy (HTTPS).
 
 Visit https://api.ipify.org. The IP shown should be:
@@ -184,7 +189,7 @@ is the usual suspect). VM broken too → the sandbox egress proxy
 The CA from Step 5 isn't installed right, or the browser wasn't fully
 restarted after installing. Quit Chrome completely and reopen.
 
-**No "Tunnel is ready!" in the server terminal?**
+**No "Agent connection" in the server terminal?**
 Wait 30 seconds. Still nothing → look for `cloudflared` errors in the
 terminal, or just ask your agent to take a look.
 

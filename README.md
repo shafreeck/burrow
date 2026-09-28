@@ -12,7 +12,7 @@ WebSocket tunnel.
 
 ```
 browser
-  ↓  127.0.0.1:8080 (local HTTP proxy) / :1080 (SOCKS5) / :8443 (VLESS)
+  ↓  Explicitly enabled: 127.0.0.1:18080 (HTTP) / :1080 (SOCKS5) / :8443 (VLESS)
 burrow-server (your Mac / public box)
   ↓  WebSocket (wss, via Cloudflare Tunnel)
 burrow-agent (VM)
@@ -35,20 +35,77 @@ go build -o burrow-agent ./cmd/burrow-agent
 
 ```bash
 # Auto-starts a cloudflared quick tunnel (recommended; URL printed in logs)
-./burrow-server --tunnel --vless 127.0.0.1:8443
+./burrow-server --tunnel --bind vless://127.0.0.1:8443
 
-# Already have a public IP / domain: no tunnel needed
-./burrow-server --vless 127.0.0.1:8443 --listen 0.0.0.0:9000
+# Fixed hostname: reuse an already configured/running cloudflared connector
+./burrow-server --tunnel --domain burrow.example.com --bind vless://127.0.0.1:8443
+
+# Plain HTTP control plane on a LAN
+./burrow-server --bind vless://127.0.0.1:8443 --listen 0.0.0.0:9000
 ```
+
+HTTP, SOCKS5, VLESS, and Trojan inbounds are disabled by default. Each requires
+an explicit listen address. The commands above enable only VLESS; add
+`--bind http://127.0.0.1:18080` for HTTP or `--bind socks5://127.0.0.1:1080` for SOCKS5.
+The control plane still defaults to `127.0.0.1:9000`.
+
+Repeat `--bind` to enable multiple listeners, including multiple addresses for
+the same protocol:
+
+```bash
+./burrow-server --tunnel --domain burrow.example.com \
+  --bind vless://127.0.0.1:8443 \
+  --bind http://127.0.0.1:18080 \
+  --bind socks5://127.0.0.1:1080
+```
+
+Supported schemes are `http`, `socks5`, `vless`, and `trojan`; host and port
+are required. Quote IPv6 URLs, e.g. `--bind 'vless://[::1]:8443'`. Duplicate
+addresses are rejected; port `0` allocates a free port and logs the actual address.
+`--vless-uuid` and `--trojan-password` apply to all inbounds of their protocol.
+The four previous proxy address flags have been replaced by `--bind`.
+
+For a fixed hostname, configure the Cloudflare Tunnel published application as
+`burrow.example.com → http://127.0.0.1:9000`. Cloudflare terminates public TLS;
+burrow serves local HTTP. This mode does not create a tunnel, change DNS, or
+start another cloudflared process. The agent connects to
+`wss://burrow.example.com/ws`.
+
+For direct public TLS:
+
+```bash
+# DNS must point to this server; public port 80 must reach --acme-listen.
+./burrow-server --acme --domain example.com \
+  --listen 0.0.0.0:443 --acme-listen 0.0.0.0:80
+
+# Or load a certificate maintained by an external certificate manager.
+./burrow-server --listen 0.0.0.0:443 \
+  --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem
+```
+
+ACME starts a dedicated HTTP-01 listener before requesting the certificate,
+then closes it before starting TLS. Use `--acme-staging` for testing.
+Certificates are saved under `./certs/`; issuance runs at startup, with no
+automatic renewal while running. Caddy/Nginx or another certificate manager
+can manage renewal and proxy to burrow over local HTTP.
+The certificate enables TLS on the control plane, VLESS, and Trojan; local
+HTTP/SOCKS proxy listeners remain plain TCP.
+
+`--domain` no longer implicitly requests a certificate: add `--acme`, provide
+certificate files, or use `--tunnel`. Tunnel mode rejects local ACME/cert flags.
 
 | Flag | Default | Description |
 |---|---|---|
 | `--listen` | `127.0.0.1:9000` | Control-plane listen addr (`/ws`, `/fetch`, `/debug`) |
-| `--proxy` | `127.0.0.1:8080` | Local HTTP proxy listen addr; empty disables |
-| `--socks5` | `127.0.0.1:1080` | SOCKS5 listen addr; empty disables |
-| `--vless` | `""` | VLESS listen addr; empty disables |
-| `--trojan` | `""` | Trojan listen addr; empty disables |
-| `--tunnel` | `false` | Auto-start `cloudflared tunnel --url` |
+| `--bind` | None | Repeatable proxy URL: protocol://host:port; supports http, socks5, vless, trojan |
+| `--tunnel` | `false` | Start Quick Tunnel without a domain; reuse a fixed tunnel with a domain |
+| `--domain` | `""` | Public hostname for fixed Tunnel or ACME |
+| `--acme` | `false` | Explicitly request a Let's Encrypt certificate for direct TLS |
+| `--acme-listen` | `:80` | HTTP-01 listener during issuance |
+| `--tls-cert` / `--tls-key` | `""` | Existing PEM certificate and key, supplied together |
+| `--system-proxy` | `false` | Use the first HTTP binding for desktop proxy after an agent connects; restore on exit |
+| `--proxy-service` | `""` | macOS service name; empty selects all enabled services |
+| `--restore-system-proxy` | `false` | Restore the saved proxy settings after an unclean exit |
 | `--cloudflared` | `cloudflared` | Path to cloudflared binary |
 | `--token` | `""` | Agent auth token; empty = no auth |
 | `--install-ca` | `false` | Install embedded Hatch egress CA and exit |
@@ -72,9 +129,41 @@ Auto-reconnects on drop (exponential backoff, max 30s).
 
 ### 4. Use it
 
-Set your browser's HTTP proxy to `127.0.0.1:8080`, visit https://api.ipify.org —
+If started with `--bind http://127.0.0.1:18080`, set your browser's HTTP proxy to that
+address and visit https://api.ipify.org —
 the IP shown is the VM's egress, not yours. Or import the printed VLESS URL
 into tunnet / Shadowrocket / Streisand.
+
+### Optional desktop proxy configuration
+
+Add `--bind http://127.0.0.1:18080 --system-proxy` to configure desktop HTTP/HTTPS
+traffic. `--system-proxy` uses the first `http://` binding and accepts loopback,
+private, and public listener addresses. Wildcards (`0.0.0.0` / `[::]`) become
+local loopback addresses on the same port for desktop applications to connect.
+A missing HTTP binding is rejected before listeners start.
+Settings change after the first authenticated agent connects. A private
+snapshot in the user config directory, `burrow/system-proxy.json`, supports
+rollback, restoration on Ctrl-C/SIGTERM, and `--restore-system-proxy` after a
+forced exit. Settings changed by another app are preserved and reported as a
+conflict during restoration.
+
+Supported backends: Windows user WinINet/LAN settings, macOS `networksetup`,
+Linux GNOME GSettings, and KDE 5/6 `kioslaverc`. macOS may require administrator
+permissions; `--proxy-service Wi-Fi` selects one service. Existing authenticated
+macOS proxies are not overwritten because their credentials cannot be restored
+through networksetup. Headless Linux reports an explicit unsupported error.
+Desktop proxy settings do not configure WinHTTP services, shell environment
+variables, or TUN routes. Windows/Linux builds and configuration logic are
+tested; native desktop writes still need validation on those platforms.
+
+### VPS deployment
+
+Use bindings such as `--bind vless://0.0.0.0:8443` to accept remote proxy clients.
+Configure clients with the VPS IP or hostname and the corresponding port;
+`0.0.0.0` is a listen address. `--system-proxy` only changes the machine running
+burrow-server, not remote clients. Omit it on a headless VPS and configure your
+desktop or phone's proxy client separately. The Cloudflare HTTP tunnel routes
+to the control plane; VLESS/Trojan TCP clients use their separate `--bind` ports.
 
 ## For Muse users
 
@@ -118,8 +207,13 @@ This is PoC-grade. Before production use:
 - `/fetch` is an unauthenticated SSRF endpoint — keep it off public networks
 - Consider: connection/rate limits, cert pinning, audit logging
 
-## Untested
+## Validation and limits
 
-- VLESS over TLS inbound (coded, not E2E-tested)
-- Trojan inbound (coded, not E2E-tested)
-- Non-Muse-VM restricted environments (same principle, not verified)
+- Local end-to-end tests cover real agent TCP forwarding through HTTP CONNECT,
+  SOCKS5, VLESS, Trojan, TLS inbounds, and VLESS MUX session reuse.
+- VLESS UDP exits from the server itself; agent UDP, MUX UDP/XUDP, Vision,
+  REALITY, and Trojan UDP/fallback are not implemented.
+- Windows and Linux builds and simulated desktop proxy restoration are checked;
+  native Windows/Linux desktop settings and third-party client interoperability
+  still need validation. Restricted environments beyond the Muse VM are untested.
+- See the [audit record](docs/audit-2026-09-29.md) for fixes, evidence, and remaining limits.
