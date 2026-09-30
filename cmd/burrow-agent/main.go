@@ -5,23 +5,33 @@
 // Example (sandbox):
 //
 //	burrow-agent --server wss://xxx.trycloudflare.com/ws \
-//	    --upstream http://198.19.0.1:3128
+//	    --upstream "$BURROW_UPSTREAM"
 package main
 
 import (
+	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/shafreeck/burrow/internal/agent"
+	"github.com/shafreeck/burrow/internal/diagnostic"
 )
 
 func main() {
+	version := flag.Bool("version", false, "print build revision and exit")
 	serverURL := flag.String("server", "", "tunnel server WebSocket URL (wss://host/ws)")
-	token := flag.String("token", "", "shared secret (must match server)")
-	upstream := flag.String("upstream", "", "upstream HTTP CONNECT proxy for egress (e.g. http://198.19.0.1:3128)")
+	token := flag.String("token", "", "shared secret (must match server; alternatively BURROW_TOKEN)")
+	upstream := flag.String("upstream", "", "remote environment HTTP CONNECT proxy for server and target egress; empty = direct; alternatively BURROW_UPSTREAM")
 	insecure := flag.Bool("insecure", false, "skip TLS certificate verification (testing only)")
 	flag.Parse()
+	if *version {
+		fmt.Println(diagnostic.Version())
+		return
+	}
 
 	if *serverURL == "" {
 		*serverURL = os.Getenv("TUNNEL_SERVER")
@@ -30,7 +40,13 @@ func main() {
 		log.Fatal("--server is required (or TUNNEL_SERVER env)")
 	}
 
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	if *token == "" {
+		*token = os.Getenv("BURROW_TOKEN")
+	}
+	if *upstream == "" {
+		*upstream = os.Getenv("BURROW_UPSTREAM")
+	}
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.LUTC)
 	cfg := agent.Config{
 		ServerURL:     *serverURL,
 		Token:         *token,
@@ -42,5 +58,7 @@ func main() {
 		log.Fatal(err)
 	}
 	ag := agent.New(cfg)
-	ag.Run()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ag.RunContext(ctx)
 }

@@ -91,6 +91,8 @@ type Hello struct {
 	Type      string `json:"type"` // "hello"
 	Token     string `json:"token,omitempty"`
 	Version   string `json:"version"`
+	Build     string `json:"build,omitempty"`
+	Session   string `json:"session,omitempty"`
 	Heartbeat bool   `json:"heartbeat,omitempty"` // application ping/pong support
 }
 
@@ -98,6 +100,8 @@ type Hello struct {
 type HelloAck struct {
 	Type      string `json:"type"` // "hello_ack"
 	OK        bool   `json:"ok"`
+	Build     string `json:"build,omitempty"`
+	Session   string `json:"session,omitempty"`
 	Heartbeat bool   `json:"heartbeat,omitempty"`
 }
 

@@ -72,15 +72,13 @@ go build -o burrow-server ./cmd/burrow-server
   Public URL:  https://xxx-xxx-xxx.trycloudflare.com
 
   Agent command:
-    burrow-agent --server wss://xxx-xxx-xxx.trycloudflare.com/ws \
-        --upstream http://<proxy> [--token <token>]
+    burrow-agent --server 'wss://xxx-xxx-xxx.trycloudflare.com/ws'
 ============================================================
 ```
 
 **做两件事：**
 
-1. **复制 `Public URL` 那行**（`https://` 开头、`trycloudflare.com` 结尾的那串），
-   下一步要发给 agent
+1. **复制完整 Agent WebSocket URL、Build 和 AI handoff**，下一步发给远端 agent
 2. **这个终端不要关**，server 要一直跑着。关了隧道就断了
 
 往上翻一点，你还能看到这两行，**也复制下来**，第 6 步配手机/客户端用：
@@ -90,29 +88,17 @@ go build -o burrow-server ./cmd/burrow-server
   VLESS URL:  vless://xxxx@127.0.0.1:8443?encryption=none&security=none&type=tcp#burrow
 ```
 
-> ⚠️ 每次重启 server，`Public URL` 都会变。变了就重新发给 agent（第 4 步）。
+> ⚠️ Quick Tunnel 模式每次重启 server，`Public URL` 会变；固定域名不会。变了就重新发给 agent（第 4 步）。
 
-## 第 4 步：让 agent 启动（Muse App 里）
+## 第 4 步：把 server 输出的完整 AI handoff 交给远端 agent
 
-打开 Muse，跟你的 agent 说下面这段话（把 `xxx` 换成你第 3 步复制的 URL）：
-
-> 把 https://github.com/shafreeck/burrow 这个仓库拉到 VM 里，
-> 编译出 burrow-agent，然后用下面这条命令跑起来：
-> `./burrow-agent --server wss://xxx-xxx-xxx.trycloudflare.com/ws --upstream http://198.19.0.1:3128`
-> 注意把 `https://` 换成 `wss://`。跑起来后把日志发我，确认连上了。
-
-**注意**：URL 是 `https://` 开头，但 agent 命令里要用 `wss://`。
-上面那段话已经写对了，直接复制就行，别改。
-
-agent 回你类似这样的日志，就是通了：
-
-```
-connecting...
-websocket connected
-```
-
-如果 agent 说连不上：先检查 URL 有没有复制错、server 那头的终端是不是还开着。
-URL 过期是最常见的原因（server 重启过），重新复制新的发给它。
+复制完整 Agent WebSocket URL、Build 版本和 AI handoff。远端 agent 应检出同一
+commit 并核对 `--version`，从当前云环境文档核实 HTTP CONNECT 出口代理；
+允许直连时省略 upstream，需要代理时设置 `BURROW_UPSTREAM`。不要假设固定代理地址。
+认证启用时通过安全渠道设置 `BURROW_TOKEN`，不要将凭据写入交接文字。
+`session_authenticated` 表示 WSS 和 hello 成功，仍需通过 Mac 的代理入口访问
+允许的目标来验收。查看 UTC 会话事件、心跳和关闭状态定位断线；不要绕过环境拒绝。
+Quick Tunnel 重启会改变 URL；固定域名由外部 connector 管理，不随 server 重启改变。
 
 ## 第 5 步：安装当前 VM 出口的 CA（Mac）
 
@@ -157,11 +143,9 @@ security find-certificate -c "Hatch Sandbox Egress CA" /Library/Keychains/System
 勾选"网页代理 (HTTP)"，填 `127.0.0.1`，端口 `18080`（启动时需指定 `--bind http://127.0.0.1:18080`）。
 HTTPS 代理也一样填。
 
-然后访问 https://api.ipify.org，页面上显示的 IP：
-- **不是**你家宽带的 IP
-- **是** VM 的出口 IP（跟 agent 在 VM 里跑 `curl https://api.ipify.org` 看到的一样）
-
-对上了，就成了。你可以让 agent 帮你确认这个 IP。
+通过上述代理访问当前环境允许的验收目标，例如允许访问时的 https://api.ipify.org。
+这证明代理路径的出口；VM 单独 curl 只证明 VM 出站，并不能证明隧道转发。
+记录请求确实通过本地代理、目标响应和 UTC 会话事件后再报告端到端成功。
 
 ### 方法 B：VLESS 客户端（手机/电脑通用）
 
@@ -184,7 +168,7 @@ tunnet 实测可用，它默认开 MUX，server 端已经支持。
 **Q：agent 说 `websocket connected`，但浏览器打不开网页？**
 A：先问 agent，它的 VM 里直接 `curl https://example.com` 通不通。
 VM 里通、浏览器不通 → 查你浏览器的代理设置（IP/端口填错最常见）。
-VM 里也不通 → 沙箱出口代理 `198.19.0.1:3128` 可能抖了，等几分钟重试。
+VM 里也不通 → 沙箱出口代理 当前环境核实的出口代理 可能抖了，等几分钟重试。
 
 **Q：访问 HTTPS 网站，浏览器还是报证书错误？**
 A：先核对当前 VM 的 CA 与 Mac 已安装 CA 的 SHA-256 指纹。即使名称相同，

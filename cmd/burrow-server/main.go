@@ -27,6 +27,7 @@ import (
 
 	"github.com/shafreeck/burrow/internal/ca"
 	"github.com/shafreeck/burrow/internal/cloudflared"
+	"github.com/shafreeck/burrow/internal/diagnostic"
 	"github.com/shafreeck/burrow/internal/server"
 	"github.com/shafreeck/burrow/internal/systemproxy"
 )
@@ -93,6 +94,7 @@ func main() {
 }
 
 func run() (runErr error) {
+	version := flag.Bool("version", false, "print build revision and exit")
 	genUUID := flag.Bool("gen-uuid", false, "generate a random UUID and exit")
 	listen := flag.String("listen", "127.0.0.1:9000", "control-plane listen address")
 	var bindings inboundBindings
@@ -118,6 +120,10 @@ func run() (runErr error) {
 	installCA := flag.Bool("install-ca", false, "install egress root CA to system trust store and exit (use --ca-cert for the current VM)")
 	caCert := flag.String("ca-cert", "", "root CA PEM file for --install-ca; empty uses the bundled Hatch CA snapshot")
 	flag.Parse()
+	if *version {
+		fmt.Println(diagnostic.Version())
+		return nil
+	}
 	if *caCert != "" && !*installCA {
 		return fmt.Errorf("--ca-cert requires --install-ca; use --tls-cert for a server TLS certificate")
 	}
@@ -144,7 +150,7 @@ func run() (runErr error) {
 		*debug = true
 	}
 
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.LUTC)
 	logf := func(f string, a ...interface{}) { log.Printf(f, a...) }
 
 	mode, err := validateTransport(*tunnel, *noTunnel, *domain, *acmeEnabled, *tlsCert, *tlsKey)
@@ -286,9 +292,9 @@ func run() (runErr error) {
 		// The URL is extracted and displayed prominently below.
 		logFn := func(s string) {
 			if *cfVerbose {
-				logf("%s", s)
+				logf("%s", diagnostic.Safe(s, *token))
 			} else if isImportant(s) {
-				logf("%s", s)
+				logf("%s", diagnostic.Safe(s, *token))
 			}
 		}
 		t, err := cloudflared.StartContext(ctx, *cfBin, "http://"+ln.Addr().String(), logFn)
@@ -296,12 +302,12 @@ func run() (runErr error) {
 			return fmt.Errorf("cloudflared failed: %w", err)
 		}
 		defer t.Stop()
-		printTunnelBox(t.URL(), wsURL(t.URL()))
+		printConnection(t.URL(), wsURL(t.URL()), *token != "", "quick")
 	} else if mode == "external" {
 		logf("using externally managed tunnel: %s -> http://%s (TLS handled by Cloudflare)", *domain, *listen)
 		logf("cloudflared must already be running with this hostname route")
 		publicURL := "https://" + *domain
-		printTunnelBox(publicURL, wsURL(publicURL))
+		printConnection(publicURL, wsURL(publicURL), *token != "", "external")
 	}
 
 	scheme := "http"
@@ -353,7 +359,7 @@ func wsURL(public string) string {
 // in non-verbose mode (errors, warnings, critical failures).
 func isImportant(s string) bool {
 	// cloudflared logs look like: "2026-09-28T14:42:10Z ERR ..." or "WRN"
-	for _, kw := range []string{" ERR ", " WRN ", "ERR|", "critical", "failed", "Failed", "FAILED"} {
+	for _, kw := range []string{" ERR ", " WRN ", "ERR|", "critical", "failed", "Failed", "FAILED", "process exited"} {
 		if contains(s, kw) {
 			return true
 		}
@@ -372,17 +378,24 @@ func contains(s, sub string) bool {
 	})()
 }
 
-// printTunnelBox displays the tunnel URL prominently, separated from logs.
-func printTunnelBox(public, ws string) {
-	fmt.Println()
-	fmt.Println("============================================================")
-	fmt.Println("  Agent connection")
-	fmt.Println()
-	fmt.Printf("  Public URL:  %s\n", public)
-	fmt.Println()
-	fmt.Printf("  Agent command:\n")
-	fmt.Printf("    burrow-agent --server %s/ws \\\n", ws)
-	fmt.Printf("        --upstream http://<proxy> [--token <token>]\n")
-	fmt.Println("============================================================")
-	fmt.Println()
+// shellQuote produces a single POSIX shell argument without expansion.
+func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
+func printConnection(public, websocket string, auth bool, owner string) {
+	websocket = strings.TrimSuffix(websocket, "/") + "/ws"
+	command := "burrow-agent --server " + shellQuote(websocket)
+	if auth {
+		command += " --token \"${BURROW_TOKEN:?Set BURROW_TOKEN through a secure channel}\""
+	}
+	fmt.Println("\nAgent connection / AI handoff")
+	fmt.Printf("Control-plane public URL: %s\nAgent WebSocket URL: %s\nBuild: %s\n", public, websocket, diagnostic.Version())
+	fmt.Printf("Tunnel ownership: %s (external means separately managed; burrow does not start, supervise or verify the connector)\n", owner)
+	fmt.Println("Copyable command (run on the remote egress machine):\n  " + command)
+	fmt.Println("AI handoff: You are operating the REMOTE egress machine, not exposing a local website. Fetch https://github.com/shafreeck/burrow, check out the Build commit printed above (never silently use another branch), build burrow-agent with scripts/build.sh and verify --version. A development or +dirty build needs a reproducible committed revision before handoff. Discover the permitted outbound HTTP CONNECT proxy from this execution environment's documented configuration; do not guess a proxy or bypass a rejected request. If direct egress is permitted, omit --upstream. Otherwise append --upstream \"$BURROW_UPSTREAM\" with that verified proxy URL. Upstream carries agent-to-server and agent-to-target outbound traffic; it is not a published local service.")
+	if auth {
+		fmt.Println("Authentication is required: obtain the matching token through an approved secret channel and set BURROW_TOKEN; never include its value in reports.")
+	} else {
+		fmt.Println("Agent token authentication is disabled; omit --token.")
+	}
+	fmt.Println("Keep one agent process running while needed. Native reconnect uses bounded exponential backoff with jitter; heartbeat detects stalled sessions but cannot repair routes or revive a terminated execution environment. Quick Tunnel URLs change on restart. Confirm session_authenticated / websocket connected and authenticated, then verify an allowed target THROUGH an enabled local HTTP/SOCKS/VLESS/Trojan proxy. A curl on the VM alone does not prove the tunnel works. /healthz verifies origin and reports agent presence; Tunnel and egress remain unverified. Detailed /diagnostics requires --debug. Report UTC timestamps, versions and sanitized session events. Do not restart services or change TUN/DNS/routes without authorization.")
+	fmt.Println("Local proxy entrypoints are the explicitly enabled --bind listeners printed above, separate from the public control plane.")
 }

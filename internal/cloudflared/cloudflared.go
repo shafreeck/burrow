@@ -57,10 +57,17 @@ func StartContext(ctx context.Context, cloudflaredBin, target string, logFn func
 	if err := t.cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start cloudflared: %w", err)
 	}
-	go t.watch(stdout, logFn)
-	go t.watch(stderr, logFn)
+	var readers sync.WaitGroup
+	readers.Add(2)
+	go func() { defer readers.Done(); t.watch(stdout, logFn) }()
+	go func() { defer readers.Done(); t.watch(stderr, logFn) }()
 	go func() {
-		t.errCh <- t.cmd.Wait()
+		readers.Wait()
+		err := t.cmd.Wait()
+		if logFn != nil {
+			logFn(fmt.Sprintf("[cloudflared] process exited error=%v expected=%t", err, ctx.Err() != nil))
+		}
+		t.errCh <- err
 	}()
 	select {
 	case url := <-t.urlCh:

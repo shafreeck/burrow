@@ -36,24 +36,13 @@ This enables only VLESS. All proxy inbounds are disabled by default; enable
 only those the user needs. For a browser HTTP proxy, also pass
 `--bind http://127.0.0.1:18080`. `--system-proxy` requires this explicit HTTP address.
 
-Wait for this block in the log:
-
-```
-============================================================
-  Agent connection
-
-  Public URL:  https://xxx.trycloudflare.com
-
-  Agent command:
-    burrow-agent --server wss://xxx.trycloudflare.com/ws \
-        --upstream http://<proxy> [--token <token>]
-============================================================
-```
-
-**Report to the user:**
-1. The `Public URL` — they must forward it to their VM agent
-   (as `wss://` — the agent skill handles the scheme swap, but mention it).
-2. The `VLESS URL` line printed earlier (`vless://...`) — for their VLESS client.
+Read the generated **AI handoff**. Forward the complete Agent WebSocket URL,
+build revision, authentication requirement, role and verification instructions.
+The copyable command omits upstream for direct egress; the remote operator discovers
+their verified HTTP CONNECT proxy and uses `BURROW_UPSTREAM` if required.
+Never send placeholder shell syntax, tokens or a supposedly universal proxy address.
+Public URL is the control plane; --bind listeners are separate local proxy entrypoints.
+A fixed-domain connector is externally managed; burrow neither starts nor supervises it.
 
 Keep the server running. A Quick Tunnel gets a new URL on restart; a configured
 fixed tunnel keeps its hostname. Only forward a replacement URL when it changed.
@@ -88,7 +77,7 @@ failing TLS connection. Finding a certificate by name does not verify its key.
 
 - If started with `--bind http://127.0.0.1:18080`, set the browser HTTP proxy to
   `127.0.0.1:18080` and visit https://api.ipify.org.
-  The IP shown should match the egress IP their VM agent reported,
+  This request must traverse the configured server proxy, and should match verified remote egress,
   not their local IP.
 - Or import the VLESS URL into tunnet / Shadowrocket / Streisand.
 

@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -242,7 +243,7 @@ func TestCloudflareBootstrapWithoutAgent(t *testing.T) {
 	const edge = "198.41.192.167:7844"
 	for _, protocol := range []string{"vless", "mux", "trojan", "http", "socks5"} {
 		t.Run(protocol, func(t *testing.T) {
-			s := New(Config{Logf: t.Logf})
+			s := New(Config{Logf: log.Printf})
 			addr := target(t, func(c net.Conn) {
 				var buf [5]byte
 				if _, err := io.ReadFull(c, buf[:]); err == nil {

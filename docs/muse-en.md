@@ -74,15 +74,13 @@ Wait 10–20 seconds. You'll see:
   Public URL:  https://xxx-xxx-xxx.trycloudflare.com
 
   Agent command:
-    burrow-agent --server wss://xxx-xxx-xxx.trycloudflare.com/ws \
-        --upstream http://<proxy> [--token <token>]
+    burrow-agent --server 'wss://xxx-xxx-xxx.trycloudflare.com/ws'
 ============================================================
 ```
 
 **Do two things:**
 
-1. **Copy the `Public URL`** (starts with `https://`, ends with
-   `trycloudflare.com`) — you'll send it to your agent next
+1. **Copy the complete Agent WebSocket URL, Build and AI handoff** for the remote agent.
 2. **Leave this terminal open** — the server must keep running
 
 Scroll up a little for these two lines, **copy them too** (needed in Step 6):
@@ -92,30 +90,20 @@ Scroll up a little for these two lines, **copy them too** (needed in Step 6):
   VLESS URL:  vless://xxxx@127.0.0.1:8443?encryption=none&security=none&type=tcp#burrow
 ```
 
-> ⚠️ The `Public URL` changes on every server restart. When it changes,
+> ⚠️ A Quick Tunnel `Public URL` changes on restart; a named hostname does not. When it changes,
 > forward the new one to your agent (Step 4).
 
-## Step 4: Have your agent start up (in the Muse app)
+## Step 4: Give the remote agent the complete generated AI handoff
 
-Open Muse and tell your agent (replace `xxx` with your URL from Step 3):
-
-> Clone https://github.com/shafreeck/burrow into the VM,
-> build burrow-agent, then run:
-> `./burrow-agent --server wss://xxx-xxx-xxx.trycloudflare.com/ws --upstream http://198.19.0.1:3128`
-> Note the scheme is `wss://`, not `https://`. Send me the log to confirm it's connected.
-
-The agent will report back something like:
-
-```
-connecting...
-websocket connected
-```
-
-`websocket connected` = tunnel is up.
-
-If it can't connect: check the URL for typos and that the server terminal
-from Step 3 is still open. An expired URL (server was restarted) is the most
-common cause — copy the fresh one and send it again.
+Copy the Agent WebSocket URL, Build revision and AI handoff. The remote agent
+checks out the same commit and compares --version. Discover the current cloud
+environment's documented HTTP CONNECT proxy; omit upstream for permitted direct
+egress, otherwise set BURROW_UPSTREAM. Never assume a universal proxy address.
+Supply BURROW_TOKEN through an approved secret channel only when auth is required.
+Session authentication proves WSS and hello, not forwarding. Verify an allowed
+target through the Mac's enabled proxy. Use UTC session events, heartbeats and close
+status to diagnose failures; do not bypass an environment policy rejection.
+Only Quick Tunnel URLs change on restart; named connectors are externally managed.
 
 ## Step 5: Install the current VM's egress CA (Mac)
 
@@ -162,12 +150,11 @@ check "Web Proxy (HTTP)", fill `127.0.0.1`, port `18080`
 (start the server with `--bind http://127.0.0.1:18080`).
 Do the same for Secure Web Proxy (HTTPS).
 
-Visit https://api.ipify.org. The IP shown should be:
-- **not** your home broadband IP
-- **the VM's egress IP** (ask your agent to run `curl https://api.ipify.org`
-  in the VM — the two must match)
-
-Match = done.
+Through that proxy, visit an explicitly permitted verification target (such as
+https://api.ipify.org if allowed). This verifies the proxy path's egress. A standalone
+VM curl only verifies VM outbound access; it does not establish tunnel forwarding.
+Record the actual proxy path, target response and UTC session events before claiming
+end-to-end success.
 
 ### Option B: VLESS client (phone/desktop)
 
@@ -193,7 +180,7 @@ Recheck it after changing VMs or egress instances if trust errors return.
 Ask the agent whether `curl https://example.com` works inside the VM.
 VM fine + browser broken → check your browser proxy settings (wrong IP/port
 is the usual suspect). VM broken too → the sandbox egress proxy
-`198.19.0.1:3128` may be flaky; wait a few minutes and retry.
+the verified environment proxy may be flaky; wait a few minutes and retry.
 
 **Browser still shows certificate errors on HTTPS?**
 Compare the current VM's CA fingerprint with the installed CA. Identical names

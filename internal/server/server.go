@@ -10,12 +10,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/shafreeck/burrow/internal/diagnostic"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shafreeck/burrow/internal/proto"
@@ -60,6 +62,9 @@ type agentConn struct {
 	id        string
 	ws        *ws.Conn
 	heartbeat *time.Timer
+	connected time.Time
+	lastPing  atomic.Int64
+	build     string
 }
 
 type stream struct {
@@ -140,9 +145,14 @@ func (s *Server) waitAgent(timeout time.Duration) *agentConn {
 // --- WebSocket endpoint ---
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	id := newID()
+	rejected := func(stage, reason string) {
+		diagnostic.Event(s.logf, "agent_rejected", map[string]interface{}{"session": id, "stage": stage, "reason": reason})
+	}
 	c, err := ws.ServerHandshake(w, r)
 	if err != nil {
-		s.log("ws handshake failed: %v", err)
+		rejected("websocket_handshake", diagnostic.Safe(err.Error(), s.cfg.Token))
+		s.log("ws handshake failed: %s", diagnostic.Safe(err.Error(), s.cfg.Token))
 		http.Error(w, err.Error(), 400)
 		return
 	}
@@ -151,6 +161,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// unauthenticated clients never enter the agents map.
 	hello, ok := s.readHello(c)
 	if !ok {
+		rejected("authentication", "invalid_or_timed_out_hello")
 		c.Close()
 		return
 	}
@@ -162,30 +173,33 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			})
 			c.WriteText(ack)
 			c.Close()
+			rejected("authentication", "bad_token")
 			s.log("agent rejected: bad token")
 			return
 		}
 	}
 	heartbeatEnabled, _ := hello["heartbeat"].(bool)
 	ack, _ := json.Marshal(proto.HelloAck{
-		Type: proto.TypeHelloAck, OK: true, Heartbeat: heartbeatEnabled,
+		Type: proto.TypeHelloAck, OK: true, Heartbeat: heartbeatEnabled, Build: diagnostic.Version(), Session: id,
 	})
 	if err := c.WriteText(ack); err != nil {
 		c.Close()
 		return
 	}
 
-	id := newID()
-	ac := &agentConn{id: id, ws: c}
+	peerBuild, _ := hello["build"].(string)
+	peerSession, _ := hello["session"].(string)
+	ac := &agentConn{id: id, ws: c, connected: time.Now(), build: diagnostic.Safe(peerBuild, s.cfg.Token)}
 	s.mu.Lock()
 	s.agents[id] = ac
 	n := len(s.agents)
 	s.mu.Unlock()
+	diagnostic.Event(s.logf, "agent_authenticated", map[string]interface{}{"session": id, "peer_session": diagnostic.Safe(peerSession, s.cfg.Token), "peer_version": ac.build, "heartbeat": heartbeatEnabled, "agents": n})
 	s.log("agent connected id=%s total=%d", id, n)
 	s.readyOnce.Do(func() { close(s.agentReady) })
 
 	var closeOnce sync.Once
-	cleanup := func() {
+	cleanup := func(reason string, code int, detail string) {
 		closeOnce.Do(func() {
 			s.mu.Lock()
 			delete(s.agents, id)
@@ -218,15 +232,16 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			s.pendingMu.Unlock()
+			diagnostic.Event(s.logf, "agent_disconnected", map[string]interface{}{"session": id, "peer_version": ac.build, "stage": "established", "duration_ms": time.Since(ac.connected).Milliseconds(), "reason": reason, "close_code": code, "detail": diagnostic.Safe(detail, s.cfg.Token), "last_ping_unix_ms": ac.lastPing.Load(), "agents": n})
 			s.log("agent disconnected id=%s total=%d", id, n)
 		})
 	}
-	defer cleanup()
+	defer cleanup("handler_exit", 0, "")
 	if heartbeatEnabled {
 		ac.heartbeat = time.AfterFunc(s.heartbeatTimeout, func() {
 			s.log("agent heartbeat timeout id=%s", id)
 			// Run cleanup here, even if dispatch is blocked by a slow stream.
-			cleanup()
+			cleanup("heartbeat_timeout", 0, "")
 		})
 		defer ac.heartbeat.Stop()
 	}
@@ -234,10 +249,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	for {
 		op, payload, err := c.ReadFrame()
 		if err != nil {
+			cleanup("transport_read", 0, err.Error())
 			return
 		}
 		switch op {
 		case ws.OpClose:
+			code, reason := ws.CloseInfo(payload)
+			cleanup("remote_close", code, reason)
 			return
 		case ws.OpText:
 			s.onText(ac, payload)
@@ -292,6 +310,7 @@ func (s *Server) onText(ac *agentConn, payload []byte) {
 		if id == "" {
 			return
 		}
+		ac.lastPing.Store(time.Now().UTC().UnixMilli())
 		if ac.heartbeat != nil {
 			ac.heartbeat.Reset(s.heartbeatTimeout)
 		}
@@ -636,6 +655,10 @@ func (s *Server) handlePlainHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/healthz", s.health)
+	if s.cfg.Debug {
+		mux.HandleFunc("/diagnostics", s.diagnostics)
+	}
 	// ACME HTTP-01 challenge (for --domain auto-cert).
 	mux.HandleFunc("/.well-known/acme-challenge/", handleACMEChallenge)
 	if s.cfg.Debug {
@@ -648,7 +671,11 @@ func (s *Server) Handler() http.Handler {
 		})
 	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("burrow server. Agent: /ws"))
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte("burrow server control plane. Agent WebSocket: /ws. Origin health: /healthz (does not verify Tunnel or egress)."))
 	})
 	return mux
 }

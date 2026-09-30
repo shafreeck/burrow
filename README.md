@@ -4,7 +4,7 @@ Turn a machine that **can only dial out** into your proxy egress, via a reverse
 WebSocket tunnel.
 
 > **Tested scenario**: Muse sandbox VM. All outbound TCP in the VM is
-> transparently rewritten to `198.19.0.1:3128` (a no-auth HTTP CONNECT proxy,
+> transparently rewritten to an environment-provided HTTP CONNECT proxy (
 > MITMs HTTPS), UDP fully disabled. `burrow-agent` runs in the VM, dials out
 > through the sandbox proxy over WebSocket back to `burrow-server`, and your
 > browser traffic exits from the VM. Other restricted environments (corporate
@@ -16,7 +16,7 @@ browser
 burrow-server (your Mac / public box)
   ↓  WebSocket (wss, via Cloudflare Tunnel)
 burrow-agent (VM)
-  ↓  HTTP CONNECT → upstream proxy (e.g. 198.19.0.1:3128)
+  ↓  verified environment HTTP CONNECT proxy, or permitted direct egress
 target website
 ```
 
@@ -27,21 +27,22 @@ Pure Go, zero third-party dependencies for the core. Single-binary cross-compile
 ### 1. Build
 
 ```bash
-go build -o burrow-server ./cmd/burrow-server
-go build -o burrow-agent ./cmd/burrow-agent
+./scripts/build.sh
+# Both revision-stamped binaries are in dist/.
+# Use ./dist/burrow-server and ./dist/burrow-agent in the examples below.
 ```
 
 ### 2. Start the server (Mac)
 
 ```bash
 # Auto-starts a cloudflared quick tunnel (recommended; URL printed in logs)
-./burrow-server --tunnel --bind vless://127.0.0.1:8443
+./dist/burrow-server --tunnel --bind vless://127.0.0.1:8443
 
 # Fixed hostname: reuse an already configured/running cloudflared connector
-./burrow-server --tunnel --domain burrow.example.com --bind vless://127.0.0.1:8443
+./dist/burrow-server --tunnel --domain burrow.example.com --bind vless://127.0.0.1:8443
 
 # Plain HTTP control plane on a LAN
-./burrow-server --bind vless://127.0.0.1:8443 --listen 0.0.0.0:9000
+./dist/burrow-server --bind vless://127.0.0.1:8443 --listen 0.0.0.0:9000
 ```
 
 HTTP, SOCKS5, VLESS, and Trojan inbounds are disabled by default. Each requires
@@ -53,7 +54,7 @@ Repeat `--bind` to enable multiple listeners, including multiple addresses for
 the same protocol:
 
 ```bash
-./burrow-server --tunnel --domain burrow.example.com \
+./dist/burrow-server --tunnel --domain burrow.example.com \
   --bind vless://127.0.0.1:8443 \
   --bind http://127.0.0.1:18080 \
   --bind socks5://127.0.0.1:1080
@@ -75,11 +76,11 @@ For direct public TLS:
 
 ```bash
 # DNS must point to this server; public port 80 must reach --acme-listen.
-./burrow-server --acme --domain example.com \
+./dist/burrow-server --acme --domain example.com \
   --listen 0.0.0.0:443 --acme-listen 0.0.0.0:80
 
 # Or load a certificate maintained by an external certificate manager.
-./burrow-server --listen 0.0.0.0:443 \
+./dist/burrow-server --listen 0.0.0.0:443 \
   --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem
 ```
 
@@ -115,9 +116,8 @@ certificate files, or use `--tunnel`. Tunnel mode rejects local ACME/cert flags.
 ### 3. Start the agent (VM)
 
 ```bash
-./burrow-agent \
-  --server wss://<tunnel-url>/ws \
-  --upstream http://198.19.0.1:3128
+./dist/burrow-agent \
+  --server 'wss://YOUR-TUNNEL-HOST/ws'
 ```
 
 | Flag | Description |
@@ -126,7 +126,7 @@ certificate files, or use `--tunnel`. Tunnel mode rejects local ACME/cert flags.
 | `--upstream` | HTTP CONNECT proxy for VM egress; empty = direct |
 | `--token` | Must match server's `--token` |
 
-Reconnects with backoff of 1, 2, 4, 8, 16, then 30 seconds. Updated peers negotiate
+Reconnects with backoff of 1, 2, 4, 8, 16, then 30 seconds (with ±20% jitter, capped at 30 seconds). Updated peers negotiate
 application heartbeats: the agent sends a ping every 10 seconds and closes the
 session if its matching pong is missing for 20 seconds. The server removes an
 agent after 45 seconds without a heartbeat. With older servers, the agent falls
@@ -155,7 +155,7 @@ with that fingerprint, then install it:
 
 ```bash
 openssl x509 -in current-egress-ca.crt -noout -subject -dates -fingerprint -sha256
-sudo ./burrow-server --install-ca --ca-cert ./current-egress-ca.crt
+sudo ./dist/burrow-server --install-ca --ca-cert ./current-egress-ca.crt
 ```
 
 This trusts certificates issued by that CA. The installer accepts one currently
@@ -273,3 +273,28 @@ This is PoC-grade. Before production use:
   native Windows/Linux desktop settings and third-party client interoperability
   still need validation. Restricted environments beyond the Muse VM are untested.
 - See the [audit record](docs/audit-2026-09-29.md) for fixes, evidence, and remaining limits.
+
+## Connection handoff and diagnostics
+
+`--server` is the control-plane WebSocket endpoint. `--bind` enables separate
+server-side proxy listeners. `--upstream` is the remote agent environment's
+HTTP CONNECT proxy for both server dial-out and target egress; omit it for permitted
+direct access. Obtain it from that environment's documented configuration, not
+from an example address. `BURROW_UPSTREAM` and `BURROW_TOKEN` supply these values
+without copying credentials into the handoff. The server prints a shell-quoted
+command and complete AI instructions, including whether auth is required.
+
+Both binaries support `--version`; `./scripts/build.sh` stamps the VCS revision and dirty status.
+Plain Go builds report VCS metadata when available, otherwise `development`.
+For reproducible builds, use `go build -ldflags "-X github.com/shafreeck/burrow/internal/diagnostic.Revision=$(git rev-parse HEAD)"`.
+Build both peers from the same commit. JSON connection events include UTC time,
+build/session identity, peer build, stage, duration and sanitized disconnect details.
+A remote WebSocket close is not proof that the origin server initiated it.
+
+`GET /healthz` reports origin availability and agent presence; it does not assert
+Cloudflare connector or target egress health. `--debug` opts into `/diagnostics`
+with peer/session/heartbeat details (as well as the existing `/debug` and `/fetch`).
+Keep debug private. Unknown paths return 404. Verify an allowed target through
+an enabled local proxy to establish end-to-end forwarding; a VM-only curl cannot.
+External named connectors remain separately managed. Quick Tunnel child exits are
+logged; they are not silently restarted or assigned a replacement URL.

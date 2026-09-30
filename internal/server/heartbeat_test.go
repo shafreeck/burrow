@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"log"
 	"net"
 	"net/http/httptest"
 	"testing"
@@ -44,7 +45,7 @@ func heartbeatClient(t *testing.T, s *Server, enabled bool) *ws.Conn {
 }
 
 func TestHeartbeatRemovesStaleAgentWithBlockedStream(t *testing.T) {
-	s := New(Config{Logf: t.Logf})
+	s := New(Config{Logf: log.Printf})
 	s.heartbeatTimeout = 200 * time.Millisecond
 	c := heartbeatClient(t, s, true)
 	ac := s.pickAgent()
@@ -87,7 +88,7 @@ func TestServerHeartbeatRefreshAndLegacyClient(t *testing.T) {
 			name = "legacy"
 		}
 		t.Run(name, func(t *testing.T) {
-			s := New(Config{Logf: t.Logf})
+			s := New(Config{Logf: log.Printf})
 			s.heartbeatTimeout = 200 * time.Millisecond
 			c := heartbeatClient(t, s, enabled)
 			for i := 0; i < 8; i++ {

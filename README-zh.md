@@ -2,7 +2,7 @@
 
 把一台**只能主动出站**的机器，通过 WebSocket 反向隧道变成你的代理出口。
 
-> **实测场景**：Muse 沙箱 VM。VM 的所有出站 TCP 被透明改写到 `198.19.0.1:3128`
+> **实测场景**：Muse 沙箱 VM。VM 的所有出站 TCP 经过当时环境提供的 HTTP CONNECT 代理
 >（无认证 HTTP CONNECT 代理，HTTPS 会被 MITM），UDP 全禁。`burrow-agent`
 > 跑在 VM 里，经沙箱代理拨出 WebSocket 连回 `burrow-server`，浏览器流量就从
 > VM 出口走了。其他受限环境（公司内网、NAT 后的机器）原理相同，但暂未实测。
@@ -13,7 +13,7 @@
 burrow-server (你 Mac / 公网机器)
   ↓  WebSocket (wss, 可经 Cloudflare Tunnel)
 burrow-agent (VM)
-  ↓  HTTP CONNECT → 上游代理 (如 198.19.0.1:3128)
+  ↓  当前环境核实的 HTTP CONNECT 出口代理，或允许的直连
 目标网站
 ```
 
@@ -24,21 +24,22 @@ burrow-agent (VM)
 ### 1. 编译
 
 ```bash
-go build -o burrow-server ./cmd/burrow-server
-go build -o burrow-agent ./cmd/burrow-agent
+./scripts/build.sh
+# Both revision-stamped binaries are in dist/.
+# Use ./dist/burrow-server and ./dist/burrow-agent in the examples below.
 ```
 
 ### 2. 启动 server（Mac）
 
 ```bash
 # 自动拉起 cloudflared quick tunnel（推荐，URL 会打印在日志里）
-./burrow-server --tunnel --bind vless://127.0.0.1:8443
+./dist/burrow-server --tunnel --bind vless://127.0.0.1:8443
 
 # 固定域名：复用已经运行并配置好路由的 cloudflared
-./burrow-server --tunnel --domain burrow.lyra.run --bind vless://127.0.0.1:8443
+./dist/burrow-server --tunnel --domain burrow.lyra.run --bind vless://127.0.0.1:8443
 
 # 局域网 HTTP 控制面
-./burrow-server --bind vless://127.0.0.1:8443 --listen 0.0.0.0:9000
+./dist/burrow-server --bind vless://127.0.0.1:8443 --listen 0.0.0.0:9000
 ```
 
 HTTP、SOCKS5、VLESS、Trojan 代理入站默认都关闭，只有显式指定对应地址才监听。
@@ -48,7 +49,7 @@ HTTP、SOCKS5、VLESS、Trojan 代理入站默认都关闭，只有显式指定�
 `--bind` 可重复，支持同一协议监听多个地址。例如同时开启三个代理入站：
 
 ```bash
-./burrow-server --tunnel --domain burrow.lyra.run \
+./dist/burrow-server --tunnel --domain burrow.lyra.run \
   --bind vless://127.0.0.1:8443 \
   --bind http://127.0.0.1:18080 \
   --bind socks5://127.0.0.1:1080
@@ -69,11 +70,11 @@ cloudflared；已有连接器由系统服务或你自己的命令管理。agent 
 **直连公网并申请 TLS 证书：**
 
 ```bash
-./burrow-server --acme --domain example.com \
+./dist/burrow-server --acme --domain example.com \
   --listen 0.0.0.0:443 --acme-listen 0.0.0.0:80
 
 # 已有证书（也适用于外部证书管理工具）
-./burrow-server --listen 0.0.0.0:443 \
+./dist/burrow-server --listen 0.0.0.0:443 \
   --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem
 ```
 
@@ -108,9 +109,8 @@ TLS 证书同时应用于控制面、VLESS 和 Trojan 入站，HTTP/SOCKS 代理
 ### 3. 启动 agent（VM）
 
 ```bash
-./burrow-agent \
-  --server wss://<tunnel-url>/ws \
-  --upstream http://198.19.0.1:3128
+./dist/burrow-agent \
+  --server 'wss://YOUR-TUNNEL-HOST/ws'
 ```
 
 | 参数 | 说明 |
@@ -143,7 +143,7 @@ SHA-256 指纹。在 Mac 上核对收到的文件，再安装：
 
 ```bash
 openssl x509 -in current-egress-ca.crt -noout -subject -dates -fingerprint -sha256
-sudo ./burrow-server --install-ca --ca-cert ./current-egress-ca.crt
+sudo ./dist/burrow-server --install-ca --ca-cert ./current-egress-ca.crt
 ```
 
 安装会信任该 CA 为网站签发的证书。程序只接受一张有效期内的自签名根 CA，
@@ -174,13 +174,13 @@ DNS、其他区域或不遵循接口绑定的 TUN 实现仍需客户端规则，
 ### 可选：自动设置桌面系统代理
 
 ```bash
-./burrow-server --tunnel --domain burrow.lyra.run --bind http://127.0.0.1:18080 --system-proxy
+./dist/burrow-server --tunnel --domain burrow.lyra.run --bind http://127.0.0.1:18080 --system-proxy
 
 # macOS 可只操作指定网络服务
-./burrow-server --tunnel --domain burrow.lyra.run --bind http://127.0.0.1:18080 --system-proxy --proxy-service Wi-Fi
+./dist/burrow-server --tunnel --domain burrow.lyra.run --bind http://127.0.0.1:18080 --system-proxy --proxy-service Wi-Fi
 
 # 被强制结束或断电后恢复
-./burrow-server --restore-system-proxy
+./dist/burrow-server --restore-system-proxy
 ```
 
 `--system-proxy` 使用第一条 `--bind http://...`，支持本机回环、内网和公网监听地址。
@@ -258,3 +258,19 @@ go vet ./...
 - 隧道尚无 TCP 半关闭语义，HTTP fetch 是最多 4 MiB 的缓冲请求，不是完整的流式 HTTP 代理。
 - 尚未完成 Xray/sing-box/Shadowrocket 的客户端兼容矩阵，也未验证其他受限 VM 环境。
 - 详细发现、已修复问题和剩余限制见 [审计记录](docs/audit-2026-09-29.md)。
+
+## 连接交接与诊断
+
+`--server` 是控制面 WebSocket 地址；`--bind` 是 server 的本地代理入口；
+`--upstream` 是远端 agent 环境用于连接 server 和目标网站的 HTTP CONNECT
+出口代理，不是被公开的本地服务。允许直接出站时省略它；需要代理时从当前
+环境文档核实，并通过 `BURROW_UPSTREAM` 设置。认证启用时通过安全渠道设置
+`BURROW_TOKEN`，不要把凭据复制给 AI。server 输出已 shell 引用的命令与完整角色说明。
+
+两端 `--version` 应对应同一 commit。JSON 连接事件记录 UTC、版本、会话、阶段、
+持续时间、心跳及脱敏的关闭状态；远端 close frame 不证明 Mac origin 主动关闭。
+自动重连带 jitter，健康计时从认证成功开始；进程或云 session 结束后不能自行复活。
+`/healthz` 仅证明 origin 存活并报告 agent 是否存在，Tunnel 与出口仍待验证；
+`--debug` 下的 `/diagnostics` 给出版本/会话/心跳，不要公开 debug。
+应通过明确启用的本地代理访问允许的目标来验收，VM 单独 curl 不证明隧道转发成功。
+固定域名 connector 由外部管理，burrow 不启动或监督它；Quick Tunnel 子进程退出会记录。

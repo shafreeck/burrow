@@ -10,9 +10,12 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/shafreeck/burrow/internal/diagnostic"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -30,7 +33,7 @@ import (
 type Config struct {
 	ServerURL string // wss://host/ws  (or ws://)
 	Token     string
-	// Upstream HTTP CONNECT proxy for egress, e.g. "http://198.19.0.1:3128".
+	// Upstream HTTP CONNECT proxy for egress, discovered from the current environment.
 	// Empty means direct egress.
 	UpstreamProxy string
 	// InsecureTLS skips TLS cert verification (self-signed testing only).
@@ -44,6 +47,7 @@ type Agent struct {
 	logf              func(string, ...interface{})
 	heartbeatInterval time.Duration
 	heartbeatTimeout  time.Duration
+	authenticatedAt   time.Time
 }
 
 // Each WebSocket session owns its streams, including dials still in progress.
@@ -203,7 +207,7 @@ func (a *Agent) viaProxy(ctx context.Context, proxyURL, target string) (net.Conn
 	if resp.StatusCode != 200 {
 		conn.Close()
 		resp.Body.Close()
-		return nil, fmt.Errorf("proxy status: %s", resp.Status)
+		return nil, fmt.Errorf("proxy status: %d", resp.StatusCode)
 	}
 	conn.SetDeadline(time.Time{})
 	// If buffered data remains, wrap.
@@ -239,22 +243,27 @@ func (a *Agent) Run() {
 func (a *Agent) RunContext(ctx context.Context) {
 	backoff := time.Second
 	for ctx.Err() == nil {
-		start := time.Now()
+		a.authenticatedAt = time.Time{}
 		err := a.runOnce(ctx)
 		if ctx.Err() != nil {
 			return
 		}
 		if err != nil {
-			a.log("connection error: %v", err)
+			a.log("connection error: %s", a.safe(err.Error()))
 		}
-		if time.Since(start) > 30*time.Second {
+		if !a.authenticatedAt.IsZero() && time.Since(a.authenticatedAt) > 30*time.Second {
 			backoff = time.Second // healthy session, reset
 		}
-		a.log("reconnecting in %v...", backoff)
+		if errorClass(err) == "hello" {
+			backoff = 30 * time.Second
+		}
+		delay := retryDelay(backoff)
+		diagnostic.Event(a.logf, "reconnect_scheduled", map[string]interface{}{"delay_ms": delay.Milliseconds(), "class": errorClass(err)})
+		a.log("reconnecting in %v...", delay)
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(backoff):
+		case <-time.After(delay):
 		}
 		if backoff < 30*time.Second {
 			backoff *= 2
@@ -265,12 +274,41 @@ func (a *Agent) RunContext(ctx context.Context) {
 	}
 }
 
-func (a *Agent) runOnce(ctx context.Context) error {
+func (a *Agent) runOnce(ctx context.Context) (result error) {
+	a.authenticatedAt = time.Time{}
+	started := time.Now()
+	sessionID := diagnostic.ID()
+	stage := "configuration"
+	peerBuild := "unknown"
+	var hb *heartbeat
+	defer func() {
+		fields := map[string]interface{}{"session": sessionID, "peer_version": peerBuild, "stage": stage, "duration_ms": time.Since(started).Milliseconds(), "class": errorClass(result)}
+		if ctx.Err() != nil {
+			fields["class"] = "canceled"
+			fields["cause"] = ctx.Err().Error()
+		}
+		if !a.authenticatedAt.IsZero() {
+			fields["authenticated_duration_ms"] = time.Since(a.authenticatedAt).Milliseconds()
+		}
+		if result != nil {
+			fields["error"] = a.safe(result.Error())
+		}
+		var ce *ws.CloseError
+		if errors.As(result, &ce) {
+			fields["close_code"] = ce.Code
+			fields["close_reason"] = a.safe(ce.Reason)
+		}
+		if hb != nil {
+			fields["last_pong_utc"] = hb.lastPong()
+		}
+		diagnostic.Event(a.logf, "session_ended", fields)
+	}()
 	if err := a.cfg.Validate(); err != nil {
 		return err
 	}
 	u, _ := url.Parse(a.cfg.ServerURL)
-	a.log("connecting to %s...", a.cfg.ServerURL)
+	stage = "dial"
+	a.log("connecting to %s...", diagnostic.Endpoint(a.cfg.ServerURL))
 	nc, err := a.dialServer(ctx)
 	if err != nil {
 		return err
@@ -278,6 +316,7 @@ func (a *Agent) runOnce(ctx context.Context) error {
 	stop := context.AfterFunc(ctx, func() { nc.Close() })
 	defer stop()
 	path := u.RequestURI()
+	stage = "websocket_handshake"
 	wsc, err := ws.ClientHandshake(nc, u.Host, path)
 	if err != nil {
 		nc.Close()
@@ -285,9 +324,10 @@ func (a *Agent) runOnce(ctx context.Context) error {
 	}
 	defer wsc.Close()
 
+	stage = "authentication"
 	// hello
 	hello, _ := json.Marshal(proto.Hello{
-		Type: proto.TypeHello, Token: a.cfg.Token, Version: "1", Heartbeat: true,
+		Type: proto.TypeHello, Token: a.cfg.Token, Version: "1", Build: diagnostic.Version(), Session: sessionID, Heartbeat: true,
 	})
 	if err := wsc.WriteText(hello); err != nil {
 		return err
@@ -296,11 +336,19 @@ func (a *Agent) runOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("hello: %w", err)
 	}
+	if op == ws.OpClose {
+		code, reason := ws.CloseInfo(payload)
+		return &ws.CloseError{Code: code, Reason: a.safe(reason)}
+	}
 	var ack proto.HelloAck
 	if op != ws.OpText || json.Unmarshal(payload, &ack) != nil || ack.Type != proto.TypeHelloAck || !ack.OK {
 		return fmt.Errorf("hello rejected or invalid acknowledgement")
 	}
 	nc.SetDeadline(time.Time{})
+	a.authenticatedAt = time.Now()
+	stage = "established"
+	peerBuild = a.safe(ack.Build)
+	diagnostic.Event(a.logf, "session_authenticated", map[string]interface{}{"session": sessionID, "server_session": a.safe(ack.Session), "peer_version": peerBuild, "heartbeat": ack.Heartbeat, "server": diagnostic.Endpoint(a.cfg.ServerURL)})
 	a.log("websocket connected and authenticated")
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &session{Agent: a, ctx: sessionCtx, cancel: cancel, streams: make(map[string]*agentStream)}
@@ -309,6 +357,7 @@ func (a *Agent) runOnce(ctx context.Context) error {
 		a.log("server lacks application heartbeat; using WebSocket ping (upgrade server for end-to-end checks)")
 	}
 	s.heartbeat = a.startHeartbeat(sessionCtx, wsc, ack.Heartbeat, s.close)
+	hb = s.heartbeat
 	defer func() {
 		cancel()
 		wsc.Close()
@@ -325,7 +374,8 @@ func (a *Agent) runOnce(ctx context.Context) error {
 		}
 		switch op {
 		case ws.OpClose:
-			return fmt.Errorf("closed by server")
+			code, reason := ws.CloseInfo(payload)
+			return &ws.CloseError{Code: code, Reason: a.safe(reason)}
 		case ws.OpText:
 			s.onText(wsc, payload)
 		case ws.OpBinary:
@@ -579,4 +629,43 @@ func (a *session) doConnect(wsc *ws.Conn, msg map[string]interface{}, st *agentS
 			}
 		}
 	}()
+}
+
+func (a *Agent) safe(raw string) string {
+	values := []string{a.cfg.Token}
+	if u, e := url.Parse(a.cfg.UpstreamProxy); e == nil && u.User != nil {
+		values = append(values, u.User.Username())
+		p, _ := u.User.Password()
+		values = append(values, p)
+	}
+	return diagnostic.Safe(raw, values...)
+}
+func retryDelay(base time.Duration) time.Duration {
+	d := time.Duration(float64(base) * (0.8 + rand.Float64()*0.4))
+	if d > 30*time.Second {
+		return 30 * time.Second
+	}
+	return d
+}
+func errorClass(err error) string {
+	if err == nil {
+		return "clean"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	var ce *ws.CloseError
+	if errors.As(err, &ce) {
+		return "remote_close"
+	}
+	text := err.Error()
+	for _, c := range []string{"heartbeat", "hello", "tls", "proxy", "ws handshake"} {
+		if strings.Contains(text, c) {
+			return strings.ReplaceAll(c, " ", "_")
+		}
+	}
+	if strings.Contains(text, "server must") || strings.Contains(text, "upstream must") {
+		return "configuration"
+	}
+	return "transport"
 }

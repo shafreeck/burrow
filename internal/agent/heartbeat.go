@@ -17,6 +17,7 @@ type heartbeat struct {
 	waiting string
 	acked   chan struct{}
 	failure error
+	lastAck time.Time
 	done    chan struct{}
 }
 
@@ -25,6 +26,7 @@ func (h *heartbeat) pong(id string) {
 	defer h.mu.Unlock()
 	if h.waiting != "" && id == h.waiting {
 		h.waiting = ""
+		h.lastAck = time.Now().UTC()
 		close(h.acked)
 	}
 }
@@ -102,4 +104,13 @@ func (a *Agent) startHeartbeat(ctx context.Context, c *ws.Conn, application bool
 		}
 	}()
 	return h
+}
+
+func (h *heartbeat) lastPong() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.lastAck.IsZero() {
+		return ""
+	}
+	return h.lastAck.Format(time.RFC3339Nano)
 }

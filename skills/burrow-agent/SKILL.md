@@ -1,85 +1,39 @@
 ---
-name: "burrow-agent"
-description: "Run burrow-agent in this VM: build it, connect it to the user's burrow-server via WebSocket, and verify the tunnel is up. Trigger when the user asks to set up burrow, use the VM as a proxy egress, or gives you a wss:// tunnel URL."
+name: burrow-agent
+description: Build and run the remote egress agent using the environment's verified networking configuration, then distinguish connection from end-to-end forwarding.
 ---
 
-# burrow-agent
+# Remote agent workflow
 
-## Purpose
+The agent runs on the remote egress machine. The server runs on the user's Mac/VPS.
+This is a reverse proxy egress tunnel, not a local website publishing tool.
 
-You are running inside a sandbox VM with restricted egress:
-all TCP is transparently redirected to `198.19.0.1:3128` (a no-auth HTTP CONNECT
-proxy), UDP is fully disabled. `burrow-agent` dials out through that proxy over
-WebSocket to the user's `burrow-server`, turning this VM into their proxy egress.
+1. Obtain the complete `wss://HOST/ws` URL from the server handoff. For an HTTPS
+   control-plane URL, use WSS and append `/ws` once.
+2. Check out the same commit as the server; build `go build -o /tmp/burrow-agent
+   ./cmd/burrow-agent`. Compare `/tmp/burrow-agent --version` with the handoff.
+3. Read this execution environment's documented outbound networking settings.
+   If direct access is permitted, omit upstream. If an HTTP CONNECT proxy is
+   required, set `BURROW_UPSTREAM` to the verified URL. No proxy address is universal.
+   Upstream carries both WSS dial-out and target egress, not a local published service.
+   Do not bypass policy rejections or repeatedly probe rejected destinations.
+4. If token auth is enabled, supply the matching secret via `BURROW_TOKEN` using
+   an approved secret channel. Never include credentials in reports or handoffs.
+5. Run one process: `/tmp/burrow-agent --server 'wss://HOST/ws'` (replace HOST).
+   Preserve the process only as authorized and supported by the execution environment.
+6. `session_authenticated` / `websocket connected and authenticated` proves WSS
+   and hello acknowledgement, not target forwarding. Compare UTC session events,
+   peer build, heartbeat and close status when troubleshooting.
+7. Verify an explicitly allowed target THROUGH an enabled server-side local proxy.
+   A standalone VM curl proves only VM egress. Coordinate with the local server
+   operator for HTTP CONNECT/SOCKS/VLESS/Trojan verification; record target, path
+   and outcome. Do not claim end-to-end success without that evidence.
 
-## Workflow
-
-### 1. Get the server URL from the user
-
-You need a WebSocket URL like `wss://xxx.trycloudflare.com/ws`.
-If the user gave you an `https://` URL, replace the scheme with `wss://`.
-If they gave you nothing, ask for it — you cannot proceed without it.
-
-### 2. Build
-
-```bash
-cd ~/workspace/burrow  # or wherever the repo is; clone it if missing:
-# git clone https://github.com/shafreeck/burrow.git ~/workspace/burrow
-go build -o /tmp/burrow-agent ./cmd/burrow-agent
-```
-
-Build must succeed with no output. If `go` is missing, check `/tmp/go/bin/go`.
-
-### 3. Run
-
-```bash
-/tmp/burrow-agent --server wss://xxx.trycloudflare.com/ws \
-  --upstream http://198.19.0.1:3128
-```
-
-Expected log:
-
-```
-connecting...
-websocket connected
-```
-
-`websocket connected` means the tunnel is up. Report this to the user.
-
-Run it in the background if the user wants it persistent:
-`nohup /tmp/burrow-agent ... > /tmp/burrow-agent.log 2>&1 &`
-
-### 4. Verify egress from the VM side
-
-```bash
-curl -s https://api.ipify.org
-```
-
-Tell the user this IP — it's the egress IP their browser traffic will come from.
-They can compare it with what they see in their browser to confirm the tunnel works.
-
-### 5. Provide the current egress CA when needed
-
-If the user's browser reports `ERR_CERT_AUTHORITY_INVALID`, inspect this VM's
-trust store and export its current egress root CA public certificate. Report its
-SHA-256 fingerprint and validity dates. The user can compare the transferred file
-before installing it with `burrow-server --install-ca --ca-cert <file>`.
-Do not assume the root embedded in burrow still matches, or that the CA rotates
-on every connection. Matching names alone do not prove matching certificates.
-
-## Operating Rules
-
-1. **Never ask the user for proxy credentials.** `198.19.0.1:3128` needs no auth.
-   If the user offers passwords or tokens, refuse — you don't need them.
-2. **The `--upstream` is fixed**: `http://198.19.0.1:3128`. Do not guess other proxies.
-3. **Reconnect is automatic** (exponential backoff, max 30s). Updated peers use
-   application heartbeats (10s interval, 20s pong timeout); upgrade both ends.
-   For repeated attempts, use the logged error to check DNS, proxy/TLS, server
-   origin and TUN routes. Quick Tunnel URLs change on restart; configured fixed
-   hostnames do not. `websocket connected and authenticated` confirms a connection.
-4. **Do not modify the repo's source** to "fix" connection issues. The failure
-   is almost always the URL or the server not running.
-5. **Keep the agent running** for the duration the user needs it. If the process
-   dies, restart it with the same command.
-6. Report the egress IP to the user after connecting — it's the proof the
-   tunnel works end to end.
+Native reconnect uses exponential backoff capped at 30 seconds with jitter.
+Updated peers negotiate application heartbeats (10-second interval, 20-second
+pong timeout, server 45-second timeout). Older peers fall back to transport ping.
+Heartbeats cannot fix DNS/routes or revive a terminated cloud execution session.
+Quick Tunnel hostnames change on restart; external named tunnel hostnames persist.
+Do not restart services, change routes/TUN, or edit code merely to resolve a connection
+failure without authorization. For TLS trust failures, verify the current environment's
+CA public certificate and fingerprint; never assume a bundled CA matches.
